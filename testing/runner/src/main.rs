@@ -1,12 +1,12 @@
 use clap::Parser;
-use ef_tests::{Suite, cases::blockchain_test::BlockchainTests};
+use ef_tests::{Case, Suite, cases::blockchain_test::BlockchainTests};
 use std::path::PathBuf;
 use tempfile::TempDir;
 
 /// CLI for running Ethereum Foundation execution witness tests.
 #[derive(Parser)]
 struct TestRunnerCommand {
-    /// Path to the test suite directory or URL to a tar.gz archive.
+    /// Path to a test suite directory, a single JSON test file, or a URL to a tar.gz archive.
     suite: String,
 }
 
@@ -30,5 +30,13 @@ fn resolve_suite_path(suite: &str) -> (PathBuf, Option<TempDir>) {
 fn main() {
     let cmd = TestRunnerCommand::parse();
     let (path, _tmp) = resolve_suite_path(&cmd.suite);
-    BlockchainTests::new(path).run();
+
+    if path.is_file() {
+        let case = <ef_tests::cases::blockchain_test::BlockchainTestCase as Case>::load(&path)
+            .expect("failed to load test case");
+        case.run().expect("test case failed");
+        println!("Test passed: {}", path.display());
+    } else {
+        BlockchainTests::new(path).run();
+    }
 }
