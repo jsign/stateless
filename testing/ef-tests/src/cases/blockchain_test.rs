@@ -611,8 +611,50 @@ fn run_subblock_validation(
                 ))
             })?;
 
+            // Debug: print each subblock's BAL output
+            println!("[DEBUG {range_name}] subblock range={bal_range:?} has block_access_list={}", output.block_access_list.is_some());
+            if let Some(ref bal_out) = output.block_access_list {
+                println!("[DEBUG {range_name}]   subblock BAL entries={}, hash={:?}",
+                    bal_out.len(),
+                    alloy_eips::eip7928::compute_block_access_list_hash(bal_out));
+                for (i, entry) in bal_out.iter().enumerate() {
+                    println!("[DEBUG {range_name}]   entry[{i}]: addr={:?} balance_changes={} nonce_changes={} code_changes={} storage_changes={} storage_reads={}",
+                        entry.address,
+                        entry.balance_changes.len(),
+                        entry.nonce_changes.len(),
+                        entry.code_changes.len(),
+                        entry.storage_changes.len(),
+                        entry.storage_reads.len());
+                    for bc in &entry.balance_changes {
+                        println!("[DEBUG {range_name}]     balance_change: idx={} post_balance={:?}", bc.block_access_index, bc.post_balance);
+                    }
+                    for nc in &entry.nonce_changes {
+                        println!("[DEBUG {range_name}]     nonce_change: idx={} new_nonce={}", nc.block_access_index, nc.new_nonce);
+                    }
+                    for cc in &entry.code_changes {
+                        println!("[DEBUG {range_name}]     code_change: idx={} new_code_len={}", cc.block_access_index, cc.new_code.len());
+                    }
+                    for sc in &entry.storage_changes {
+                        println!("[DEBUG {range_name}]     storage_change: slot={:?} changes={:?}", sc.slot, sc.changes);
+                    }
+                    for sr in &entry.storage_reads {
+                        println!("[DEBUG {range_name}]     storage_read: {:?}", sr);
+                    }
+                }
+            }
+
             subblock_outputs.push(output);
         }
+
+        // Debug: print the expected BAL hash from block header
+        use alloy_consensus::BlockHeader;
+        let expected_bal_hash = block.header.block_access_list_hash();
+        println!("[DEBUG {range_name}] expected BAL hash from header: {expected_bal_hash:?}");
+
+        // Debug: compute the original alloy_bal hash for reference
+        let original_bal: alloy_eip7928::BlockAccessList = (*bal).clone().into_alloy_bal();
+        let original_hash = alloy_eips::eip7928::compute_block_access_list_hash(&original_bal);
+        println!("[DEBUG {range_name}] original BAL hash (from fixture->revm->alloy roundtrip): {original_hash:?}");
 
         let aggregation_input = AggregationInput {
             block: block.clone(),

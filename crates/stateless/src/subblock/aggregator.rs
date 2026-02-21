@@ -370,13 +370,23 @@ fn merge_block_access_list(target: &mut BlockAccessList, other: &BlockAccessList
     sort_block_access_list(target);
 }
 
-/// Sorts a [`BlockAccessList`] to satisfy EIP-7928 canonical ordering.
+/// Sorts a [`BlockAccessList`] to satisfy EIP-7928 canonical ordering and removes
+/// storage reads that overlap with storage changes (written slots are not reads).
 fn sort_block_access_list(bal: &mut BlockAccessList) {
     for entry in bal.iter_mut() {
         // Sort storage_changes by slot key, and within each slot by block_access_index
         entry.storage_changes.sort_by(|a, b| a.slot.cmp(&b.slot));
         for sc in &mut entry.storage_changes {
             sc.changes.sort_by_key(|c| c.block_access_index);
+        }
+
+        // Remove storage_reads for slots that also appear in storage_changes.
+        // A slot that was written at any point during the block is not a read-only slot,
+        // even if a different subblock only read it.
+        if !entry.storage_changes.is_empty() {
+            entry.storage_reads.retain(|slot| {
+                !entry.storage_changes.iter().any(|sc| sc.slot == *slot)
+            });
         }
 
         // Sort storage_reads by key

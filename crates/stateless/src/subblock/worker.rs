@@ -163,9 +163,9 @@ where
 
     // Determine subblock position flags
     // is_first: BAL range starts at 0 (includes pre-execution system calls)
-    // is_last: BAL range ends beyond tx_count (includes post-execution/withdrawals)
+    // is_last: BAL range includes the post-execution index (tx_count + 1)
     let is_first = bal_range.start == 0;
-    let is_last = bal_range.end > tx_count as u64;
+    let is_last = bal_range.end > (tx_count + 1) as u64;
 
     // Convert BAL range to tx indices for execution
     // BAL index i corresponds to tx i-1 (index 1 = tx 0, index 2 = tx 1, etc.)
@@ -243,13 +243,80 @@ where
 
     let gas_used = result.gas_used;
 
-    let block_access_list = result.block_access_list;
+    // Filter the built BAL to only include changes within our range.
+    // The BAL builder may record changes outside the subblock's range (e.g., cross-index
+    // system calls). Without filtering, adjacent subblocks would produce duplicate entries
+    // when merged by the aggregator.
+    let block_access_list =
+        result.block_access_list.map(|bal_list| filter_bal_to_range(bal_list, &bal_range));
 
     Ok(SubblockOutput { receipts, logs_bloom, requests, block_access_list, gas_used })
 }
 
+/// Filters a [`BlockAccessList`] to only include changes within the given BAL range.
+///
+/// The BAL builder may record changes at indices outside the subblock's range
+/// (e.g., cross-index system calls that straddle the boundary). This function
+/// strips out-of-range changes so that adjacent subblocks don't produce duplicates
+/// when merged by the aggregator.
+///
+/// `storage_reads` are slot numbers (not BAL-indexed) and are preserved as-is.
+fn filter_bal_to_range(
+    mut bal: alloy_eip7928::BlockAccessList,
+    range: &core::ops::Range<u64>,
+) -> alloy_eip7928::BlockAccessList {
+    // Preserve entries that were originally empty: those represent account-access-only
+    // touches that are valid BAL entries in EIP-7928.
+    let mut keep_if_empty = Vec::with_capacity(bal.len());
+    for entry in &mut bal {
+        let originally_empty = entry.balance_changes.is_empty()
+            && entry.nonce_changes.is_empty()
+            && entry.code_changes.is_empty()
+            && entry.storage_changes.is_empty()
+            && entry.storage_reads.is_empty();
+        keep_if_empty.push(originally_empty);
+
+        entry
+            .balance_changes
+            .retain(|c| c.block_access_index >= range.start && c.block_access_index < range.end);
+        entry
+            .nonce_changes
+            .retain(|c| c.block_access_index >= range.start && c.block_access_index < range.end);
+        entry
+            .code_changes
+            .retain(|c| c.block_access_index >= range.start && c.block_access_index < range.end);
+        for sc in &mut entry.storage_changes {
+            sc.changes.retain(|c| {
+                c.block_access_index >= range.start && c.block_access_index < range.end
+            });
+        }
+        entry.storage_changes.retain(|sc| !sc.changes.is_empty());
+    }
+
+    bal.into_iter()
+        .zip(keep_if_empty)
+        .filter_map(|(entry, keep_empty_entry)| {
+            let has_data = !entry.balance_changes.is_empty()
+                || !entry.nonce_changes.is_empty()
+                || !entry.code_changes.is_empty()
+                || !entry.storage_changes.is_empty()
+                || !entry.storage_reads.is_empty();
+            if has_data || keep_empty_entry {
+                Some(entry)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
+    use super::filter_bal_to_range;
+    use alloc::vec;
+    use alloy_eip7928::{AccountChanges, BalanceChange};
+    use alloy_primitives::{Address, U256};
+
     // Integration tests require full mock setup with witnesses and BAL.
     // These tests verify the partial execution logic at a unit level.
 
@@ -328,5 +395,37 @@ mod tests {
         let is_last_4 = 12 > (tx_count + 1) as u64;
         assert!(is_first_4);
         assert!(is_last_4);
+    }
+
+    #[test]
+    fn test_filter_bal_to_range_preserves_account_access_only_entries() {
+        let address = Address::repeat_byte(0x11);
+        let bal = vec![AccountChanges {
+            address,
+            balance_changes: vec![],
+            nonce_changes: vec![],
+            code_changes: vec![],
+            storage_changes: vec![],
+            storage_reads: vec![],
+        }];
+
+        let filtered = filter_bal_to_range(bal, &(0..3));
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].address, address);
+    }
+
+    #[test]
+    fn test_filter_bal_to_range_drops_entries_emptied_by_out_of_range_filtering() {
+        let bal = vec![AccountChanges {
+            address: Address::repeat_byte(0x22),
+            balance_changes: vec![BalanceChange::new(10, U256::from(1))],
+            nonce_changes: vec![],
+            code_changes: vec![],
+            storage_changes: vec![],
+            storage_reads: vec![],
+        }];
+
+        let filtered = filter_bal_to_range(bal, &(0..3));
+        assert!(filtered.is_empty());
     }
 }
