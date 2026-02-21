@@ -19,16 +19,24 @@ alloy-trie.workspace = true
 alloy-consensus.workspace = true
 alloy-rpc-types-debug.workspace = true
 alloy-genesis = { workspace = true, features = ["serde-bincode-compat"] }
+alloy-evm.workspace = true
+alloy-eips = { workspace = true }
+alloy-eip7928 = { workspace = true, features = ["serde"] }
 
 # reth
 reth-ethereum-consensus.workspace = true
 reth-primitives-traits.workspace = true
-reth-ethereum-primitives = { workspace = true, features = ["serde", "serde-bincode-compat"] }
+reth-ethereum-primitives = { workspace = true, features = [
+    "serde",
+    "serde-bincode-compat",
+] }
 reth-evm.workspace = true
 reth-trie-common.workspace = true
 reth-trie-sparse.workspace = true
 reth-chainspec.workspace = true
 reth-consensus.workspace = true
+reth-revm.workspace = true
+reth-evm-ethereum.workspace = true
 
 # revm
 revm-bytecode.workspace = true

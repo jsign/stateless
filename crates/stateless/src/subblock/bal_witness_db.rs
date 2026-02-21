@@ -35,13 +35,12 @@
 //! without re-executing prior transactions.
 
 use alloc::{collections::btree_map::BTreeMap, format, sync::Arc};
-use alloy_primitives::{map::B256Map, Address, B256, U256};
-use reth_errors::ProviderError;
-use reth_revm::{bytecode::Bytecode, state::AccountInfo, Database};
+use alloy_primitives::{Address, B256, U256, map::B256Map};
+use reth_revm::{Database, bytecode::Bytecode, state::AccountInfo};
 use revm_database_interface::bal::{BalState, EvmDatabaseError};
 use revm_state::bal::Bal;
 
-use crate::trie::StatelessTrie;
+use crate::{error::WitnessDbError, trie::StatelessTrie};
 
 /// A witness database wrapped with BAL support for fast-forwarding state.
 ///
@@ -115,7 +114,7 @@ impl<T> Database for BalWitnessDatabase<'_, T>
 where
     T: StatelessTrie,
 {
-    type Error = EvmDatabaseError<ProviderError>;
+    type Error = EvmDatabaseError<WitnessDbError>;
 
     fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
         // First get base account from trie
@@ -151,15 +150,16 @@ where
 
     fn code_by_hash(&mut self, code_hash: B256) -> Result<Bytecode, Self::Error> {
         self.bytecode.get(&code_hash).cloned().ok_or_else(|| {
-            EvmDatabaseError::Database(ProviderError::TrieWitnessError(format!(
+            EvmDatabaseError::Database(WitnessDbError::TrieWitness(format!(
                 "bytecode for {code_hash} not found"
             )))
         })
     }
 
     fn block_hash(&mut self, block_number: u64) -> Result<B256, Self::Error> {
-        self.block_hashes_by_block_number.get(&block_number).copied().ok_or_else(|| {
-            EvmDatabaseError::Database(ProviderError::StateForNumberNotFound(block_number))
-        })
+        self.block_hashes_by_block_number
+            .get(&block_number)
+            .copied()
+            .ok_or_else(|| EvmDatabaseError::Database(WitnessDbError::StateNotFound(block_number)))
     }
 }

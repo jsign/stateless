@@ -116,6 +116,8 @@ impl From<Header> for SealedHeader {
             excess_blob_gas: value.excess_blob_gas.map(|v| v.to::<u64>()),
             parent_beacon_block_root: value.parent_beacon_block_root,
             requests_hash: value.requests_hash,
+            block_access_list_hash: None,
+            slot_number: None,
         };
         Self::new(header, value.hash)
     }
@@ -141,6 +143,8 @@ pub struct Block {
     pub transaction_sequence: Option<Vec<TransactionSequence>>,
     /// Withdrawals
     pub withdrawals: Option<Withdrawals>,
+    /// Block Access List (EIP-7928)
+    pub block_access_list: Option<alloy_eip7928::BlockAccessList>,
 }
 
 /// Transaction sequence in block
@@ -324,6 +328,10 @@ pub enum ForkSpec {
     Prague,
     /// Osaka
     Osaka,
+    /// BPO2 to Amsterdam at time 15k
+    BPO2ToAmsterdamAtTime15k,
+    /// Amsterdam,
+    Amsterdam,
 }
 
 impl ForkSpec {
@@ -392,6 +400,10 @@ impl ForkSpec {
                 .with_fork(EthereumHardfork::Prague, ForkCondition::Timestamp(15_000)),
             Self::Prague => spec_builder.prague_activated(),
             Self::Osaka => spec_builder.osaka_activated(),
+            Self::BPO2ToAmsterdamAtTime15k => spec_builder
+                .osaka_activated()
+                .with_fork(EthereumHardfork::Amsterdam, ForkCondition::Timestamp(15_000)),
+            Self::Amsterdam => spec_builder.amsterdam_activated(),
         }
         .build()
     }

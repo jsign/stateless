@@ -22,7 +22,11 @@ reth-chainspec = { workspace = true, features = ["std"] }
 reth-ethereum-primitives = { workspace = true, features = ["std"] }
 reth-primitives-traits = { workspace = true, features = ["std", "rayon"] }
 reth-consensus = { workspace = true, features = ["std"] }
-reth-db = { workspace = true, features = ["mdbx", "test-utils", "disable-lock"] }
+reth-db = { workspace = true, features = [
+    "mdbx",
+    "test-utils",
+    "disable-lock",
+] }
 reth-db-api.workspace = true
 reth-db-common.workspace = true
 reth-provider = { workspace = true, features = ["test-utils"] }
@@ -34,13 +38,20 @@ reth-trie-common = { workspace = true, features = ["std"] }
 reth-tracing.workspace = true
 reth-trie.workspace = true
 reth-trie-db.workspace = true
-revm = { workspace = true, features = ["secp256k1", "blst", "c-kzg", "memory_limit"] }
+revm = { workspace = true, features = [
+    "secp256k1",
+    "blst",
+    "c-kzg",
+    "memory_limit",
+] }
+revm-state = { workspace = true, features = ["serde"] }
 
 alloy-rlp.workspace = true
 alloy-primitives.workspace = true
 alloy-eips.workspace = true
 alloy-consensus.workspace = true
 alloy-genesis.workspace = true
+alloy-eip7928 = { workspace = true, features = ["serde"] }
 
 walkdir.workspace = true
 serde = { workspace = true, features = ["std"] }

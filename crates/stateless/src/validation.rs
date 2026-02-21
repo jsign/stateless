@@ -186,6 +186,8 @@ where
         &output.receipts,
         &output.requests,
         None,
+        &output.block_access_list,
+        Some(output.gas_used),
     )
     .map_err(StatelessValidationError::ConsensusValidationFailed)?;
 

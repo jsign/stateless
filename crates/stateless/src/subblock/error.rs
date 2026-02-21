@@ -3,6 +3,7 @@
 use alloc::string::String;
 use alloy_primitives::{Address, B256, U256};
 
+use crate::error::WitnessDbError;
 use crate::validation::StatelessValidationError;
 
 /// Errors that can occur during subblock validation.
@@ -69,7 +70,9 @@ pub enum SubblockValidationError {
     },
 
     /// Storage change mismatch between built and provided BAL.
-    #[error("storage mismatch for {address} slot {slot} at index {index}: built {built}, provided {provided}")]
+    #[error(
+        "storage mismatch for {address} slot {slot} at index {index}: built {built}, provided {provided}"
+    )]
     BalStorageMismatch {
         /// Account address.
         address: Address,
@@ -97,7 +100,9 @@ pub enum SubblockValidationError {
 #[derive(Debug, thiserror::Error)]
 pub enum AggregationValidationError {
     /// Transaction ranges are not contiguous.
-    #[error("transaction ranges are not contiguous: range {index} ends at {end}, but range {next_index} starts at {start}")]
+    #[error(
+        "transaction ranges are not contiguous: range {index} ends at {end}, but range {next_index} starts at {start}"
+    )]
     NonContiguousRanges {
         /// Index of the first range.
         index: usize,
@@ -110,7 +115,9 @@ pub enum AggregationValidationError {
     },
 
     /// Transaction ranges don't cover all transactions.
-    #[error("transaction ranges don't cover all transactions: ranges cover 0..{covered}, block has {tx_count} transactions")]
+    #[error(
+        "transaction ranges don't cover all transactions: ranges cover 0..{covered}, block has {tx_count} transactions"
+    )]
     IncompleteRanges {
         /// End of coverage.
         covered: usize,
@@ -139,7 +146,9 @@ pub enum AggregationValidationError {
     },
 
     /// Gas chaining mismatch.
-    #[error("gas chaining mismatch: subblock {index} ended with {expected} gas, but subblock {next_index} implies starting gas doesn't match")]
+    #[error(
+        "gas chaining mismatch: subblock {index} ended with {expected} gas, but subblock {next_index} implies starting gas doesn't match"
+    )]
     GasChainingMismatch {
         /// Index of the subblock.
         index: usize,
@@ -153,9 +162,13 @@ pub enum AggregationValidationError {
     #[error("stateless validation error: {0}")]
     StatelessValidation(#[from] StatelessValidationError),
 
+    /// Error looking up pre-state account data from the witness.
+    #[error("witness database error: {0}")]
+    WitnessDb(#[from] WitnessDbError),
+
     /// Consensus validation error.
     #[error("consensus validation error: {0}")]
-    ConsensusValidation(#[from] reth_errors::ConsensusError),
+    ConsensusValidation(#[from] reth_consensus::ConsensusError),
 
     /// Post-state root mismatch.
     #[error("post-state root mismatch: computed {computed}, expected {expected}")]

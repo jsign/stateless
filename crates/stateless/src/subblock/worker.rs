@@ -39,10 +39,10 @@
 
 use alloc::{fmt::Debug, sync::Arc, vec::Vec};
 use alloy_consensus::{BlockHeader, Header, TxReceipt};
-use alloy_evm::{block::BlockExecutor, eth::spec::EthExecutorSpec, Evm};
-use alloy_primitives::{keccak256, Bloom};
+use alloy_evm::{Evm, block::BlockExecutor, eth::spec::EthExecutorSpec};
+use alloy_primitives::{Bloom, keccak256};
+use reth_chainspec::Hardforks;
 use reth_chainspec::{EthChainSpec, EthereumHardforks};
-use reth_ethereum_forks::Hardforks;
 use reth_ethereum_primitives::EthereumReceipt;
 use reth_evm::ConfigureEvm;
 use reth_evm_ethereum::EthEvmConfig;
@@ -50,10 +50,10 @@ use reth_primitives_traits::SealedHeader;
 use reth_revm::db::State;
 
 use crate::{
-    recover_block::{recover_block_with_public_keys, UncompressedPublicKey},
+    recover_block::{UncompressedPublicKey, recover_block_with_public_keys},
     subblock::{
-        create_subblock_execution_ctx, error::SubblockValidationError, validate_subblock_bal,
-        BalWitnessDatabase, SubblockInput, SubblockOutput,
+        BalWitnessDatabase, SubblockInput, SubblockOutput, create_subblock_execution_ctx,
+        error::SubblockValidationError, validate_subblock_bal,
     },
     trie::StatelessSparseTrie,
     validation::StatelessValidationError,
@@ -249,7 +249,9 @@ where
 
     let gas_used = result.gas_used;
 
-    Ok(SubblockOutput { receipts, logs_bloom, requests, gas_used })
+    let block_access_list = result.block_access_list;
+
+    Ok(SubblockOutput { receipts, logs_bloom, requests, block_access_list, gas_used })
 }
 
 #[cfg(test)]

@@ -8,6 +8,7 @@
 
 use alloc::{sync::Arc, vec::Vec};
 use alloy_consensus::Receipt;
+use alloy_eip7928::BlockAccessList;
 use alloy_eips::eip7685::Requests;
 use alloy_genesis::ChainConfig;
 use alloy_primitives::Bloom;
@@ -105,6 +106,8 @@ pub struct SubblockOutput<R = alloy_consensus::Receipt> {
     pub requests: Requests,
     /// Total gas used by transactions in this subblock.
     pub gas_used: u64,
+    /// Block Access List entries generated during execution of this subblock.
+    pub block_access_list: Option<BlockAccessList>,
 }
 
 /// Input to the master/aggregator guest program.

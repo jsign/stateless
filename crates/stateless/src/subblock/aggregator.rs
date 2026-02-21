@@ -40,10 +40,11 @@
 //!
 //! If the computed root doesn't match, the block is invalid.
 
-use alloc::{fmt::Debug, sync::Arc, vec::Vec};
+use alloc::{collections::BTreeMap, fmt::Debug, sync::Arc, vec::Vec};
 use alloy_consensus::{BlockHeader, Header, TxReceipt};
+use alloy_eip7928::BlockAccessList;
 use alloy_eips::{eip7685::Requests, eip7928::compute_block_access_list_hash};
-use alloy_primitives::{keccak256, Bloom, B256};
+use alloy_primitives::{Address, B256, Bloom, U256, keccak256};
 use core::ops::Range;
 use reth_chainspec::{EthChainSpec, EthereumHardforks};
 use reth_ethereum_consensus::validate_block_post_execution;
@@ -51,10 +52,10 @@ use reth_ethereum_primitives::EthereumReceipt;
 use reth_primitives_traits::SealedHeader;
 
 use crate::{
-    recover_block::{recover_block_with_public_keys, UncompressedPublicKey},
+    recover_block::{UncompressedPublicKey, recover_block_with_public_keys},
     subblock::{
-        bal_state::bal_to_hashed_post_state, error::AggregationValidationError, AggregationInput,
-        SubblockOutput,
+        AggregationInput, SubblockOutput, bal_state::bal_to_hashed_post_state,
+        error::AggregationValidationError,
     },
     trie::StatelessSparseTrie,
     validation::StatelessValidationError,
@@ -157,8 +158,13 @@ where
     ))?;
 
     // Combine outputs
-    let (combined_receipts, combined_bloom, combined_requests, combined_gas_used) =
-        combine_subblock_outputs(&subblock_outputs);
+    let (
+        combined_receipts,
+        combined_bloom,
+        combined_requests,
+        combined_block_access_list,
+        combined_gas_used,
+    ) = combine_subblock_outputs(&subblock_outputs);
 
     // Run post-block validation
     validate_block_post_execution(
@@ -167,6 +173,7 @@ where
         &combined_receipts,
         &combined_requests,
         None,
+        &Some(combined_block_access_list),
         Some(combined_gas_used),
     )?;
 
@@ -182,7 +189,7 @@ where
 
     // Use the trie as the pre-state provider to look up unchanged account fields
     let hashed_post_state = bal_to_hashed_post_state(&bal, final_bal_index, &trie)
-        .map_err(|e| AggregationValidationError::StatelessValidation(e.into()))?;
+        .map_err(AggregationValidationError::WitnessDb)?;
     let computed_root = trie
         .calculate_state_root(hashed_post_state)
         .map_err(AggregationValidationError::StatelessValidation)?;
@@ -306,6 +313,85 @@ fn verify_gas_chaining(
     Ok(())
 }
 
+/// Merges entries from `other` into `target` per EIP-7928 ordering rules.
+///
+/// For the same address, fields are merged (deduplicated where required).
+/// After merging, the result is sorted to satisfy EIP-7928 canonical ordering:
+/// - Accounts sorted lexicographically by address
+/// - `storage_changes` sorted lexicographically by slot; changes within each slot
+///   sorted by `block_access_index` ascending
+/// - `storage_reads` sorted lexicographically
+/// - `balance_changes`, `nonce_changes`, `code_changes` sorted by `block_access_index`
+///   ascending
+fn merge_block_access_list(target: &mut BlockAccessList, other: &BlockAccessList) {
+    // Build an index of existing addresses in target for efficient lookup
+    let mut addr_index: BTreeMap<Address, usize> = BTreeMap::new();
+    for (i, entry) in target.iter().enumerate() {
+        addr_index.insert(entry.address, i);
+    }
+
+    for entry in other {
+        if let Some(&idx) = addr_index.get(&entry.address) {
+            // Merge into existing entry
+            let existing = &mut target[idx];
+
+            // Merge storage_changes by slot key
+            let mut slot_index: BTreeMap<U256, usize> = BTreeMap::new();
+            for (i, sc) in existing.storage_changes.iter().enumerate() {
+                slot_index.insert(sc.slot, i);
+            }
+            for sc in &entry.storage_changes {
+                if let Some(&si) = slot_index.get(&sc.slot) {
+                    existing.storage_changes[si].changes.extend(sc.changes.clone());
+                } else {
+                    slot_index.insert(sc.slot, existing.storage_changes.len());
+                    existing.storage_changes.push(sc.clone());
+                }
+            }
+
+            // Deduplicate storage_reads
+            for read in &entry.storage_reads {
+                if !existing.storage_reads.contains(read) {
+                    existing.storage_reads.push(*read);
+                }
+            }
+
+            existing.balance_changes.extend(entry.balance_changes.clone());
+            existing.nonce_changes.extend(entry.nonce_changes.clone());
+            existing.code_changes.extend(entry.code_changes.clone());
+        } else {
+            // New address — append and track
+            addr_index.insert(entry.address, target.len());
+            target.push(entry.clone());
+        }
+    }
+
+    // Apply EIP-7928 canonical ordering
+    sort_block_access_list(target);
+}
+
+/// Sorts a [`BlockAccessList`] to satisfy EIP-7928 canonical ordering.
+fn sort_block_access_list(bal: &mut BlockAccessList) {
+    for entry in bal.iter_mut() {
+        // Sort storage_changes by slot key, and within each slot by block_access_index
+        entry.storage_changes.sort_by(|a, b| a.slot.cmp(&b.slot));
+        for sc in &mut entry.storage_changes {
+            sc.changes.sort_by_key(|c| c.block_access_index);
+        }
+
+        // Sort storage_reads by key
+        entry.storage_reads.sort();
+
+        // Sort change lists by block_access_index
+        entry.balance_changes.sort_by_key(|c| c.block_access_index);
+        entry.nonce_changes.sort_by_key(|c| c.block_access_index);
+        entry.code_changes.sort_by_key(|c| c.block_access_index);
+    }
+
+    // Sort accounts lexicographically by address
+    bal.sort_by(|a, b| a.address.cmp(&b.address));
+}
+
 /// Combines subblock outputs into final aggregated values.
 ///
 /// Adjusts cumulative gas in receipts so they reflect global block position
@@ -327,11 +413,12 @@ fn verify_gas_chaining(
 /// ```
 fn combine_subblock_outputs(
     outputs: &[SubblockOutput<EthereumReceipt>],
-) -> (Vec<EthereumReceipt>, Bloom, Requests, u64) {
+) -> (Vec<EthereumReceipt>, Bloom, Requests, BlockAccessList, u64) {
     let mut combined_receipts = Vec::new();
     let mut combined_bloom = Bloom::default();
     let mut combined_requests = Requests::default();
     let mut combined_gas_used = 0u64;
+    let mut combined_block_access_list = Vec::new();
     let mut gas_offset: u64 = 0;
 
     for output in outputs {
@@ -352,10 +439,20 @@ fn combine_subblock_outputs(
             combined_requests = output.requests.clone();
         }
 
+        if let Some(block_access_list) = &output.block_access_list {
+            merge_block_access_list(&mut combined_block_access_list, block_access_list);
+        }
+
         combined_gas_used += output.gas_used;
     }
 
-    (combined_receipts, combined_bloom, combined_requests, combined_gas_used)
+    (
+        combined_receipts,
+        combined_bloom,
+        combined_requests,
+        combined_block_access_list,
+        combined_gas_used,
+    )
 }
 
 #[cfg(test)]
@@ -457,16 +554,18 @@ mod tests {
             receipts: vec![receipt1, receipt2],
             logs_bloom: Bloom::default(),
             requests: Requests::default(),
+            block_access_list: None,
             gas_used: 42000,
         };
         let output2 = SubblockOutput {
             receipts: vec![receipt3],
             logs_bloom: Bloom::default(),
             requests: Requests::default(),
+            block_access_list: None,
             gas_used: 30000,
         };
 
-        let (combined, _, _, _) = combine_subblock_outputs(&[output1, output2]);
+        let (combined, _, _, _, _) = combine_subblock_outputs(&[output1, output2]);
 
         // After adjustment:
         // - Receipt 1: 21000 (no offset)
@@ -500,12 +599,14 @@ mod tests {
             receipts: vec![receipt1],
             logs_bloom: Bloom::default(),
             requests: Requests::default(),
+            block_access_list: None,
             gas_used: 42000,
         };
         let output2 = SubblockOutput {
             receipts: vec![receipt2],
             logs_bloom: Bloom::default(),
             requests: Requests::default(),
+            block_access_list: None,
             gas_used: 21000,
         };
 

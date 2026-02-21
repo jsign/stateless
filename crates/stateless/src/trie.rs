@@ -1,12 +1,13 @@
 use crate::error::WitnessDbError;
+use crate::subblock::PreStateAccountProvider;
 use crate::validation::StatelessValidationError;
-use alloc::{format, vec::Vec};
+use alloc::{collections::VecDeque, format, vec::Vec};
 use alloy_primitives::{Address, B256, U256, keccak256, map::B256Map};
 use alloy_rlp::{Decodable, Encodable};
 use alloy_rpc_types_debug::ExecutionWitness;
-use alloy_trie::{EMPTY_ROOT_HASH, TrieAccount};
+use alloy_trie::{EMPTY_ROOT_HASH, TrieAccount, nodes::TrieNode};
 use itertools::Itertools;
-use reth_trie_common::{HashedPostState, Nibbles, TRIE_ACCOUNT_RLP_MAX_SIZE};
+use reth_trie_common::{HashedPostState, Nibbles, ProofTrieNodeV2, TrieNodeV2, TRIE_ACCOUNT_RLP_MAX_SIZE};
 use reth_trie_sparse::{
     RevealableSparseTrie, SparseStateTrie, SparseTrie,
     errors::SparseStateTrieResult,
@@ -47,6 +48,14 @@ pub trait StatelessTrie: core::fmt::Debug {
 #[derive(Debug)]
 pub struct StatelessSparseTrie {
     inner: SparseStateTrie,
+}
+
+impl PreStateAccountProvider for StatelessSparseTrie {
+    type Error = WitnessDbError;
+
+    fn account(&self, address: Address) -> Result<Option<TrieAccount>, Self::Error> {
+        self.account(address)
+    }
 }
 
 impl StatelessSparseTrie {
@@ -189,15 +198,15 @@ fn verify_execution_witness(
         bytecode.insert(hash, Bytecode::new_raw(rlp_encoded.clone()));
     }
 
-    // Reveal the witness with our state root
-    // This method builds a trie using the sparse trie using the state_witness with
-    // the root being the pre_state_root.
-    // Here are some things to note:
+    // Reveal the witness by doing a BFS walk from the state root through hash-keyed
+    // witness nodes, collecting path-keyed proof nodes for the account and storage tries.
+    //
+    // Some things to note:
     // - You can pass in more witnesses than is needed for the block execution.
-    // - If you try to get an account and it has not been seen. This means that the account
-    // was not inserted into the Trie. It does not mean that the account does not exist.
-    // In order to determine an account not existing, we must do an exclusion proof.
-    trie.reveal_witness(pre_state_root, &state_witness)
+    // - If you try to get an account and it has not been seen, this means that the account
+    //   was not inserted into the Trie. It does not mean that the account does not exist.
+    //   In order to determine an account not existing, we must do an exclusion proof.
+    reveal_witness(&mut trie, pre_state_root, &state_witness)
         .map_err(|_e| StatelessValidationError::WitnessRevealFailed { pre_state_root })?;
 
     // Calculate the root
@@ -213,6 +222,93 @@ fn verify_execution_witness(
             expected: pre_state_root,
         })
     }
+}
+
+/// Reveals witness trie nodes into a [`SparseStateTrie`] by walking the flat hash-keyed witness
+/// starting from the state root.
+///
+/// This is a local reimplementation of the upstream `SparseStateTrie::reveal_witness` which was
+/// removed in favour of multiproof-based revealing. We do a BFS from the state root, decode each
+/// node to follow child hashes, and collect path-keyed [`ProofTrieNodeV2`] entries grouped into
+/// account and per-account storage proof nodes. These are then revealed via the public API.
+fn reveal_witness(
+    trie: &mut SparseStateTrie,
+    state_root: B256,
+    witness: &B256Map<alloy_primitives::Bytes>,
+) -> SparseStateTrieResult<()> {
+    // Queue entries: (node_hash, path_so_far, optional_account_address)
+    // When `maybe_account` is None we are in the account trie; when Some we are in a storage trie.
+    let mut queue = VecDeque::from([(state_root, Nibbles::default(), None::<B256>)]);
+
+    let mut account_nodes: Vec<ProofTrieNodeV2> = Vec::new();
+    let mut storage_nodes: B256Map<Vec<ProofTrieNodeV2>> = B256Map::default();
+
+    while let Some((hash, path, maybe_account)) = queue.pop_front() {
+        let Some(trie_node_bytes) = witness.get(&hash) else { continue };
+
+        // Decode as TrieNode (v1) to inspect children and follow hashes.
+        let trie_node = TrieNode::decode(&mut &trie_node_bytes[..])?;
+
+        // Push children into the queue.
+        match &trie_node {
+            TrieNode::Branch(branch) => {
+                for (idx, maybe_child) in branch.as_ref().children() {
+                    if let Some(child_hash) = maybe_child.and_then(|c| c.as_hash()) {
+                        let mut child_path = path;
+                        child_path.push_unchecked(idx);
+                        queue.push_back((child_hash, child_path, maybe_account));
+                    }
+                }
+            }
+            TrieNode::Extension(ext) => {
+                if let Some(child_hash) = ext.child.as_hash() {
+                    let mut child_path = path;
+                    child_path.extend(&ext.key);
+                    queue.push_back((child_hash, child_path, maybe_account));
+                }
+            }
+            TrieNode::Leaf(leaf) => {
+                // If we are in the account trie and this leaf is an account, follow its
+                // storage root into the storage trie.
+                if maybe_account.is_none() {
+                    let mut full_path = path;
+                    full_path.extend(&leaf.key);
+                    let hashed_address = B256::from_slice(&full_path.pack());
+                    if let Ok(account) = TrieAccount::decode(&mut &leaf.value[..]) {
+                        if account.storage_root != EMPTY_ROOT_HASH {
+                            queue.push_back((
+                                account.storage_root,
+                                Nibbles::default(),
+                                Some(hashed_address),
+                            ));
+                        }
+                    }
+                }
+            }
+            TrieNode::EmptyRoot => {}
+        }
+
+        // Decode as TrieNodeV2 for revealing (handles extension+branch merging for inline
+        // children automatically).
+        let node_v2 = TrieNodeV2::decode(&mut &trie_node_bytes[..])?;
+        let proof_node = ProofTrieNodeV2 { path, node: node_v2, masks: None };
+
+        if let Some(account) = maybe_account {
+            storage_nodes.entry(account).or_default().push(proof_node);
+        } else {
+            account_nodes.push(proof_node);
+        }
+    }
+
+    // Reveal collected proof nodes via the public API.
+    if !account_nodes.is_empty() {
+        trie.reveal_account_v2_proof_nodes(account_nodes)?;
+    }
+    for (account, nodes) in storage_nodes {
+        trie.reveal_storage_v2_proof_nodes(account, nodes)?;
+    }
+
+    Ok(())
 }
 
 // Copied and modified from ress: https://github.com/paradigmxyz/ress/blob/06bf2c4788e45b8fcbd640e38b6243e6f87c4d0e/crates/engine/src/tree/root.rs

@@ -25,8 +25,11 @@ use reth_provider::{
 use reth_revm::{State, database::StateProviderDatabase, witness::ExecutionWitnessRecord};
 use reth_trie::{HashedPostState, KeccakKeyHasher, StateRoot};
 use reth_trie_db::DatabaseStateRoot;
+use revm_state::bal::Bal;
 use stateless::{
-    ExecutionWitness, UncompressedPublicKey, trie::StatelessSparseTrie,
+    ExecutionWitness, UncompressedPublicKey,
+    subblock::{AggregationInput, SubblockInput, aggregation_validation, subblock_validation},
+    trie::StatelessSparseTrie,
     validation::stateless_validation_with_trie,
 };
 use std::{
@@ -283,8 +286,16 @@ fn run_case(
             .map_err(|err| Error::block_failed(block_number, program_inputs.clone(), err))?;
 
         // Consensus checks after block execution
-        validate_block_post_execution(block, &chain_spec, &output.receipts, &output.requests, None)
-            .map_err(|err| Error::block_failed(block_number, program_inputs.clone(), err))?;
+        validate_block_post_execution(
+            block,
+            &chain_spec,
+            &output.receipts,
+            &output.requests,
+            None,
+            &output.block_access_list,
+            Some(output.gas_used),
+        )
+        .map_err(|err| Error::block_failed(block_number, program_inputs.clone(), err))?;
 
         // Generate the stateless witness
         // TODO: Most of this code is copy-pasted from debug_executionWitness
