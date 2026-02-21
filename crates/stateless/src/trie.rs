@@ -5,7 +5,7 @@ use alloc::{collections::VecDeque, format, vec::Vec};
 use alloy_primitives::{Address, B256, U256, keccak256, map::B256Map};
 use alloy_rlp::{Decodable, Encodable};
 use alloy_rpc_types_debug::ExecutionWitness;
-use alloy_trie::{EMPTY_ROOT_HASH, TrieAccount, nodes::TrieNode};
+use alloy_trie::{EMPTY_ROOT_HASH, TrieAccount, nodes::{RlpNode, TrieNode}};
 use itertools::Itertools;
 use reth_trie_common::{HashedPostState, Nibbles, ProofTrieNodeV2, TrieNodeV2, TRIE_ACCOUNT_RLP_MAX_SIZE};
 use reth_trie_sparse::{
@@ -236,42 +236,63 @@ fn reveal_witness(
     state_root: B256,
     witness: &B256Map<alloy_primitives::Bytes>,
 ) -> SparseStateTrieResult<()> {
-    // Queue entries: (node_hash, path_so_far, optional_account_address)
-    // When `maybe_account` is None we are in the account trie; when Some we are in a storage trie.
-    let mut queue = VecDeque::from([(state_root, Nibbles::default(), None::<B256>)]);
+    // Queue entries: (node_hash, proof_path, pending_extension, maybe_account)
+    //
+    // - proof_path: The path at which this node should be placed in the V2 proof.
+    // - pending_extension: When a hash-referenced Extension is encountered, its key and child
+    //   RlpNode are forwarded to the child Branch so they can be merged into a single V2
+    //   BranchNodeV2 (which carries the extension key in its `key` field).
+    // - maybe_account: None = account trie, Some(hashed_address) = storage trie.
+    let mut queue: VecDeque<(B256, Nibbles, Option<(Nibbles, RlpNode)>, Option<B256>)> =
+        VecDeque::from([(state_root, Nibbles::default(), None, None)]);
 
     let mut account_nodes: Vec<ProofTrieNodeV2> = Vec::new();
     let mut storage_nodes: B256Map<Vec<ProofTrieNodeV2>> = B256Map::default();
 
-    while let Some((hash, path, maybe_account)) = queue.pop_front() {
+    while let Some((hash, path, pending_ext, maybe_account)) = queue.pop_front() {
         let Some(trie_node_bytes) = witness.get(&hash) else { continue };
 
         // Decode as TrieNode (v1) to inspect children and follow hashes.
         let trie_node = TrieNode::decode(&mut &trie_node_bytes[..])?;
 
-        // Push children into the queue.
+        // When there's a pending extension, the actual trie position of this node is
+        // `path + ext_key`. We need this "trie path" for computing child paths correctly.
+        let trie_path = if let Some((ref ext_key, _)) = pending_ext {
+            let mut p = path;
+            p.extend(ext_key);
+            p
+        } else {
+            path
+        };
+
+        // Push children into the queue using trie_path (actual position in the trie).
         match &trie_node {
             TrieNode::Branch(branch) => {
                 for (idx, maybe_child) in branch.as_ref().children() {
                     if let Some(child_hash) = maybe_child.and_then(|c| c.as_hash()) {
-                        let mut child_path = path;
+                        let mut child_path = trie_path;
                         child_path.push_unchecked(idx);
-                        queue.push_back((child_hash, child_path, maybe_account));
+                        queue.push_back((child_hash, child_path, None, maybe_account));
                     }
                 }
             }
             TrieNode::Extension(ext) => {
                 if let Some(child_hash) = ext.child.as_hash() {
-                    let mut child_path = path;
-                    child_path.extend(&ext.key);
-                    queue.push_back((child_hash, child_path, maybe_account));
+                    // Don't extend the path — push the child at the current trie_path
+                    // with the extension info so the child Branch can be merged with it.
+                    queue.push_back((
+                        child_hash,
+                        trie_path,
+                        Some((ext.key.clone(), ext.child.clone())),
+                        maybe_account,
+                    ));
                 }
             }
             TrieNode::Leaf(leaf) => {
                 // If we are in the account trie and this leaf is an account, follow its
                 // storage root into the storage trie.
                 if maybe_account.is_none() {
-                    let mut full_path = path;
+                    let mut full_path = trie_path;
                     full_path.extend(&leaf.key);
                     let hashed_address = B256::from_slice(&full_path.pack());
                     if let Ok(account) = TrieAccount::decode(&mut &leaf.value[..]) {
@@ -279,6 +300,7 @@ fn reveal_witness(
                             queue.push_back((
                                 account.storage_root,
                                 Nibbles::default(),
+                                None,
                                 Some(hashed_address),
                             ));
                         }
@@ -291,7 +313,32 @@ fn reveal_witness(
         // Decode as TrieNodeV2 for revealing (handles extension+branch merging for inline
         // children automatically).
         let node_v2 = TrieNodeV2::decode(&mut &trie_node_bytes[..])?;
-        let proof_node = ProofTrieNodeV2 { path, node: node_v2, masks: None };
+
+        // In V2 format, extension nodes don't exist as standalone proof nodes — they are
+        // merged into their child Branch. When the child is inline, TrieNodeV2::decode does
+        // this automatically. When the child is a hash reference, the decode produces a
+        // standalone Extension which we skip here; the extension info has been forwarded to
+        // the child via `pending_ext` above.
+        if matches!(node_v2, TrieNodeV2::Extension(_)) {
+            continue;
+        }
+
+        // If there's a pending extension, merge it into this Branch node: set the extension
+        // key and child RlpNode, and use the extension's path as the proof path.
+        let (proof_path, node_v2) = if let Some((ext_key, ext_child_rlp)) = pending_ext {
+            match node_v2 {
+                TrieNodeV2::Branch(mut branch) => {
+                    branch.key = ext_key;
+                    branch.branch_rlp_node = Some(ext_child_rlp);
+                    (path, TrieNodeV2::Branch(branch))
+                }
+                other => (trie_path, other),
+            }
+        } else {
+            (path, node_v2)
+        };
+
+        let proof_node = ProofTrieNodeV2 { path: proof_path, node: node_v2, masks: None };
 
         if let Some(account) = maybe_account {
             storage_nodes.entry(account).or_default().push(proof_node);
