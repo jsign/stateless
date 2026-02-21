@@ -39,7 +39,7 @@
 
 use alloc::{fmt::Debug, sync::Arc, vec::Vec};
 use alloy_consensus::{BlockHeader, Header, TxReceipt};
-use alloy_evm::{Evm, block::BlockExecutor, eth::spec::EthExecutorSpec};
+use alloy_evm::{block::BlockExecutor, eth::spec::EthExecutorSpec};
 use alloy_primitives::{Bloom, keccak256};
 use reth_chainspec::Hardforks;
 use reth_chainspec::{EthChainSpec, EthereumHardforks};
@@ -203,37 +203,31 @@ where
 
     // Apply pre-execution changes only if this is the first subblock
     // This handles beacon root and blockhashes system calls at BAL index 0
+    // Note: apply_pre_execution_changes() internally bumps the BAL index when amsterdam is active
     if is_first {
         block_executor.apply_pre_execution_changes().map_err(|e| {
             SubblockValidationError::ExecutionFailed(alloc::string::ToString::to_string(&e))
         })?;
-
-        // Bump BAL index after pre-execution changes (EIP-7928: index 0 is pre-execution)
-        block_executor.evm_mut().db_mut().bump_bal_index();
     }
 
     // Execute only our transaction range
+    // Note: execute_transaction() -> commit_transaction() internally bumps the BAL index
     for tx in recovered_block.transactions_recovered().skip(tx_start).take(tx_end - tx_start) {
         block_executor.execute_transaction(tx).map_err(|e| {
             SubblockValidationError::ExecutionFailed(alloc::string::ToString::to_string(&e))
         })?;
-
-        // Bump BAL index after each transaction (EIP-7928)
-        block_executor.evm_mut().db_mut().bump_bal_index();
     }
 
-    // Finish execution to get receipts and EVM (for BAL extraction)
-    // Withdrawals are only processed if is_last=true (context has withdrawals=Some)
-    let (evm, result) = block_executor.finish().map_err(|e| {
+    // Finish execution to get receipts and result
+    // finish() processes withdrawals (if is_last), extracts the built BAL, and returns it
+    // in result.block_access_list
+    let (_evm, result) = block_executor.finish().map_err(|e| {
         SubblockValidationError::ExecutionFailed(alloc::string::ToString::to_string(&e))
     })?;
 
-    // Extract state_db from EVM for BAL validation
-    let (state_db, _) = evm.finish();
-
-    // Extract built BAL and validate against provided BAL
-    let built_bal = state_db.take_built_alloy_bal();
-    validate_subblock_bal(&bal, built_bal, &bal_range)?;
+    // Validate the built BAL against the provided BAL
+    // The built BAL was extracted by finish() and is in result.block_access_list
+    validate_subblock_bal(&bal, result.block_access_list.clone(), &bal_range)?;
 
     // Get receipts directly from result (already contains only our executed txs)
     let receipts: Vec<EthereumReceipt> = result.receipts;
