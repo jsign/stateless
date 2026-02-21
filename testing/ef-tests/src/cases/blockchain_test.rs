@@ -388,6 +388,16 @@ fn run_case(
         .expect("stateless validation failed");
     }
 
+    // Run subblock validation for blocks with BAL data (EIP-7928)
+    for (block_index, (recovered_block, execution_witness)) in program_inputs.iter().enumerate() {
+        // Get BAL from the test case block if present
+        if let Some(alloy_bal) =
+            case.blocks.get(block_index).and_then(|b| b.block_access_list.clone())
+        {
+            run_subblock_validation(recovered_block, execution_witness, alloy_bal, &chain_spec)?;
+        }
+    }
+
     Ok(program_inputs)
 }
 
@@ -526,4 +536,87 @@ fn execution_witness_with_parent(parent: &RecoveredBlock<Block>) -> ExecutionWit
     let mut serialized_header = Vec::new();
     parent.header().encode(&mut serialized_header);
     ExecutionWitness { headers: vec![serialized_header.into()], ..Default::default() }
+}
+
+/// Runs subblock validation for a block with BAL data.
+///
+/// This tests the subblock proving implementation by executing the full block
+/// as a single subblock (BAL range `[0, tx_count+2)`).
+fn run_subblock_validation(
+    recovered_block: &RecoveredBlock<Block>,
+    execution_witness: &ExecutionWitness,
+    alloy_bal: alloy_eip7928::BlockAccessList,
+    chain_spec: &Arc<ChainSpec>,
+) -> Result<(), Error> {
+    // Convert alloy BAL to revm BAL
+    let bal: Bal = alloy_bal
+        .try_into()
+        .map_err(|e| Error::Assertion(format!("Failed to convert BAL: {e:?}")))?;
+    let bal = Arc::new(bal);
+
+    // Get block and transaction count
+    let block = recovered_block.clone().into_block();
+    let tx_count = block.body.transactions.len();
+
+    // Recover public keys from transaction signatures
+    let public_keys = recover_signers(block.body().transactions())
+        .map_err(|e| Error::Assertion(format!("Failed to recover signers: {e}")))?;
+
+    // Test different BAL range partitioning strategies:
+    let test_cases = vec![
+        ("single", vec![0..(tx_count as u64 + 2)]),
+        (
+            "pre, all-txs, post",
+            vec![
+                0..1,                                         // pre-tx-exec
+                1..(tx_count as u64 + 1),                     // all txs exec
+                (tx_count as u64 + 1)..(tx_count as u64 + 2), // post-tx-exec
+            ],
+        ),
+        ("max granularity", (0..(tx_count as u64 + 2)).map(|i| i..(i + 1)).collect()),
+    ];
+
+    for (range_name, test_ranges) in test_cases {
+        let mut subblock_outputs = Vec::new();
+
+        for bal_range in &test_ranges {
+            let input = SubblockInput {
+                block: block.clone(),
+                witness: execution_witness.clone(),
+                bal: bal.clone(),
+                bal_range: bal_range.clone(),
+                chain_config: Default::default(),
+            };
+
+            let output = subblock_validation(
+                input,
+                public_keys.clone(),
+                chain_spec.clone(),
+                EthEvmConfig::new(chain_spec.clone()),
+            )
+            .map_err(|e| {
+                Error::Assertion(format!(
+                    "Subblock validation failed for {range_name} range {bal_range:?}: {e:?}"
+                ))
+            })?;
+
+            subblock_outputs.push(output);
+        }
+
+        let aggregation_input = AggregationInput {
+            block: block.clone(),
+            witness: execution_witness.clone(),
+            bal: bal.clone(),
+            chain_config: Default::default(),
+            subblock_outputs,
+            bal_ranges: test_ranges.clone(),
+        };
+
+        aggregation_validation(aggregation_input, public_keys.clone(), chain_spec.clone())
+            .map_err(|e| {
+                Error::Assertion(format!("Aggregation validation failed for {range_name}: {e:?}"))
+            })?;
+    }
+
+    Ok(())
 }
