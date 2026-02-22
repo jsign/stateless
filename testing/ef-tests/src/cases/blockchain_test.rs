@@ -8,6 +8,11 @@ use alloy_rlp::{Decodable, Encodable};
 use rayon::iter::{IndexedParallelIterator, ParallelIterator};
 use reth_chainspec::ChainSpec;
 use reth_consensus::{Consensus, HeaderValidator};
+use reth_db_api::{
+    cursor::{DbCursorRO, DbDupCursorRO},
+    tables,
+    transaction::DbTx,
+};
 use reth_db_common::init::{insert_genesis_hashes, insert_genesis_history, insert_genesis_state};
 use reth_ethereum_consensus::{EthBeaconConsensus, validate_block_post_execution};
 use reth_ethereum_primitives::{Block, TransactionSigned};
@@ -19,11 +24,11 @@ use reth_primitives_traits::{
 use reth_provider::{
     BlockWriter, DatabaseProviderFactory, ExecutionOutcome, HeaderProvider, HistoryWriter,
     OriginalValuesKnown, StateProofProvider, StateWriteConfig, StateWriter,
-    StaticFileProviderFactory, StaticFileSegment, StaticFileWriter,
+    StaticFileProviderFactory, StaticFileSegment, StaticFileWriter, TrieWriter,
     test_utils::create_test_provider_factory_with_chain_spec,
 };
 use reth_revm::{State, database::StateProviderDatabase, witness::ExecutionWitnessRecord};
-use reth_trie::{HashedPostState, KeccakKeyHasher, StateRoot};
+use reth_trie::{HashedPostState, KeccakKeyHasher, StateRoot, TrieInput};
 use reth_trie_db::DatabaseStateRoot;
 use revm_state::bal::Bal;
 use stateless::{
@@ -301,7 +306,69 @@ fn run_case(
         // TODO: Most of this code is copy-pasted from debug_executionWitness
         let ExecutionWitnessRecord { hashed_state, codes, keys, lowest_block_number } =
             witness_record;
-        let state = state_provider.witness(Default::default(), hashed_state)?;
+        let mut witness_target = hashed_state.clone();
+        let mut address_preimages = std::collections::HashMap::new();
+        let mut slot_preimages = std::collections::HashMap::new();
+        let mut accounts_with_deletions = std::collections::HashSet::new();
+        for key in &keys {
+            if key.len() == 20 {
+                let address = alloy_primitives::Address::from_slice(key.as_ref());
+                address_preimages.insert(alloy_primitives::keccak256(address), address);
+            } else if key.len() == 32 {
+                let slot = alloy_primitives::B256::from_slice(key.as_ref());
+                slot_preimages.insert(alloy_primitives::keccak256(slot), slot);
+            }
+        }
+        for (hashed_address, storage) in &mut witness_target.storages {
+            let Some(address) = address_preimages.get(hashed_address).copied() else {
+                continue;
+            };
+            let zero_slots: Vec<_> = storage
+                .storage
+                .iter()
+                .filter_map(|(slot, value)| value.is_zero().then_some(*slot))
+                .collect();
+            for hashed_slot in zero_slots {
+                if let Some(plain_slot) = slot_preimages.get(&hashed_slot).copied()
+                    && let Some(pre_value) = state_provider.storage(address, plain_slot)?
+                {
+                    if !pre_value.is_zero() {
+                        storage.storage.insert(hashed_slot, pre_value);
+                        accounts_with_deletions.insert(*hashed_address);
+                    }
+                }
+            }
+        }
+        for hashed_address in accounts_with_deletions {
+            let Some(address) = address_preimages.get(&hashed_address).copied() else {
+                continue;
+            };
+            if let Some(storage) = witness_target.storages.get_mut(&hashed_address) {
+                let mut storage_cursor =
+                    provider.tx_ref().cursor_dup_read::<tables::PlainStorageState>().map_err(
+                        |err| Error::block_failed(block_number, program_inputs.clone(), err),
+                    )?;
+                let mut entry = storage_cursor.seek_exact(address).map_err(|err| {
+                    Error::block_failed(block_number, program_inputs.clone(), err)
+                })?;
+                while let Some((_addr, storage_entry)) = entry {
+                    if !storage_entry.value.is_zero() {
+                        storage.storage.insert(
+                            alloy_primitives::keccak256(storage_entry.key),
+                            storage_entry.value,
+                        );
+                    }
+                    entry = storage_cursor.next_dup().map_err(|err| {
+                        Error::block_failed(block_number, program_inputs.clone(), err)
+                    })?;
+                }
+            }
+        }
+        let trie_input =
+            TrieInput { prefix_sets: witness_target.construct_prefix_sets(), ..Default::default() };
+        let state = state_provider
+            .witness(trie_input, witness_target)
+            .map_err(|err| Error::block_failed(block_number, program_inputs.clone(), err))?;
         let mut exec_witness = ExecutionWitness { state, codes, keys, headers: Default::default() };
 
         let smallest = lowest_block_number.unwrap_or_else(|| {
@@ -327,7 +394,7 @@ fn run_case(
         // Compute and check the post state root
         let hashed_state =
             HashedPostState::from_bundle_state::<KeccakKeyHasher>(output.state.state());
-        let (computed_state_root, _) = StateRoot::overlay_root_with_updates(
+        let (computed_state_root, trie_updates) = StateRoot::overlay_root_with_updates(
             provider.tx_ref(),
             &hashed_state.clone_into_sorted(),
         )
@@ -351,6 +418,9 @@ fn run_case(
 
         provider
             .write_hashed_state(&hashed_state.into_sorted())
+            .map_err(|err| Error::block_failed(block_number, program_inputs.clone(), err))?;
+        provider
+            .write_trie_updates(trie_updates)
             .map_err(|err| Error::block_failed(block_number, program_inputs.clone(), err))?;
         provider
             .update_history_indices(block.number..=block.number)
