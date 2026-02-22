@@ -5,9 +5,14 @@ use alloc::{collections::VecDeque, format, vec::Vec};
 use alloy_primitives::{Address, B256, U256, keccak256, map::B256Map};
 use alloy_rlp::{Decodable, Encodable};
 use alloy_rpc_types_debug::ExecutionWitness;
-use alloy_trie::{EMPTY_ROOT_HASH, TrieAccount, nodes::{RlpNode, TrieNode}};
+use alloy_trie::{
+    EMPTY_ROOT_HASH, TrieAccount,
+    nodes::{RlpNode, TrieNode},
+};
 use itertools::Itertools;
-use reth_trie_common::{HashedPostState, Nibbles, ProofTrieNodeV2, TrieNodeV2, TRIE_ACCOUNT_RLP_MAX_SIZE};
+use reth_trie_common::{
+    HashedPostState, Nibbles, ProofTrieNodeV2, TRIE_ACCOUNT_RLP_MAX_SIZE, TrieNodeV2,
+};
 use reth_trie_sparse::{
     RevealableSparseTrie, SparseStateTrie, SparseTrie,
     errors::SparseStateTrieResult,

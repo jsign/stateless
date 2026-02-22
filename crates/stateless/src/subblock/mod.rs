@@ -82,7 +82,7 @@ mod types;
 mod worker;
 
 pub use aggregator::aggregation_validation;
-pub use bal_state::{bal_to_hashed_post_state, PreStateAccountProvider};
+pub use bal_state::{PreStateAccountProvider, bal_to_hashed_post_state};
 pub use error::{AggregationValidationError, SubblockValidationError};
 pub use execution::create_subblock_execution_ctx;
 pub use types::{AggregationInput, SubblockInput, SubblockOutput};

@@ -301,11 +301,7 @@ fn filter_bal_to_range(
                 || !entry.code_changes.is_empty()
                 || !entry.storage_changes.is_empty()
                 || !entry.storage_reads.is_empty();
-            if has_data || keep_empty_entry {
-                Some(entry)
-            } else {
-                None
-            }
+            if has_data || keep_empty_entry { Some(entry) } else { None }
         })
         .collect()
 }

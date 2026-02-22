@@ -4,7 +4,7 @@
 
 use alloc::vec::Vec;
 use alloy_consensus::constants::KECCAK_EMPTY;
-use alloy_primitives::{keccak256, Address, B256, U256};
+use alloy_primitives::{Address, B256, U256, keccak256};
 use alloy_trie::TrieAccount;
 use reth_primitives_traits::Account;
 use reth_trie_common::{HashedPostState, HashedStorage};
@@ -126,11 +126,7 @@ where
                 bytecode_hash: code.map(|(hash, _)| hash).or_else(|| {
                     pre_state_account.and_then(|a| {
                         // KECCAK_EMPTY means no code, represented as None in Account
-                        if a.code_hash == KECCAK_EMPTY {
-                            None
-                        } else {
-                            Some(a.code_hash)
-                        }
+                        if a.code_hash == KECCAK_EMPTY { None } else { Some(a.code_hash) }
                     })
                 }),
             };

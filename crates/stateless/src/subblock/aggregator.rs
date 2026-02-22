@@ -384,9 +384,9 @@ fn sort_block_access_list(bal: &mut BlockAccessList) {
         // A slot that was written at any point during the block is not a read-only slot,
         // even if a different subblock only read it.
         if !entry.storage_changes.is_empty() {
-            entry.storage_reads.retain(|slot| {
-                !entry.storage_changes.iter().any(|sc| sc.slot == *slot)
-            });
+            entry
+                .storage_reads
+                .retain(|slot| !entry.storage_changes.iter().any(|sc| sc.slot == *slot));
         }
 
         // Sort storage_reads by key

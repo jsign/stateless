@@ -55,7 +55,7 @@ mod tests {
     use super::*;
     use alloc::vec;
     use alloy_consensus::Header;
-    use alloy_primitives::{Bytes as PrimitiveBytes, B256};
+    use alloy_primitives::{B256, Bytes as PrimitiveBytes};
     use reth_ethereum_primitives::{Block, BlockBody};
     use reth_primitives_traits::RecoveredBlock;
 
