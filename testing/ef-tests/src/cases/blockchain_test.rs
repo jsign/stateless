@@ -8,7 +8,7 @@ use alloy_rlp::{Decodable, Encodable};
 use rayon::iter::{IndexedParallelIterator, ParallelIterator};
 use reth_chainspec::ChainSpec;
 use reth_consensus::{Consensus, HeaderValidator};
-use reth_db::{ClientVersion, init_db, mdbx::DatabaseArguments, test_utils::TempDatabase};
+use reth_db::{init_db, mdbx::DatabaseArguments, test_utils::TempDatabase};
 use reth_db_common::init::{insert_genesis_hashes, insert_genesis_history, insert_genesis_state};
 use reth_ethereum_consensus::{EthBeaconConsensus, validate_block_post_execution};
 use reth_ethereum_primitives::{Block, TransactionSigned};
@@ -563,8 +563,9 @@ fn path_contains(path_str: &str, rhs: &[&str]) -> bool {
     path_str.contains(&rhs)
 }
 
-/// Creates a provider factory with mainnet-sized MDBX geometry (8 TiB) instead of the default
-/// test geometry (64 MiB).
+/// Creates a provider factory with a larger MDBX geometry (1 GiB) than the default test
+/// geometry (64 MiB), while keeping other test-friendly settings (small growth step, unbounded
+/// read transactions).
 fn create_provider_factory_with_chain_spec(
     chain_spec: Arc<ChainSpec>,
 ) -> ProviderFactory<MockNodeTypesWithDB> {
@@ -575,8 +576,8 @@ fn create_provider_factory_with_chain_spec(
 
     std::fs::create_dir_all(&static_files_path).expect("failed to create static_files dir");
 
-    let db = init_db(&db_path, DatabaseArguments::new(ClientVersion::default()))
-        .expect("failed to init db");
+    let args = DatabaseArguments::test().with_geometry_max_size(Some(1024 * 1024 * 1024));
+    let db = init_db(&db_path, args).expect("failed to init db");
     let db = Arc::new(TempDatabase::new(db, datadir_path));
 
     ProviderFactory::new(
