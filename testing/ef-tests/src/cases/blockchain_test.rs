@@ -8,6 +8,7 @@ use alloy_rlp::{Decodable, Encodable};
 use rayon::iter::{IndexedParallelIterator, ParallelIterator};
 use reth_chainspec::ChainSpec;
 use reth_consensus::{Consensus, HeaderValidator};
+use reth_db::{ClientVersion, init_db, mdbx::DatabaseArguments, test_utils::TempDatabase};
 use reth_db_common::init::{insert_genesis_hashes, insert_genesis_history, insert_genesis_state};
 use reth_ethereum_consensus::{EthBeaconConsensus, validate_block_post_execution};
 use reth_ethereum_primitives::{Block, TransactionSigned};
@@ -18,9 +19,10 @@ use reth_primitives_traits::{
 };
 use reth_provider::{
     BlockWriter, DatabaseProviderFactory, ExecutionOutcome, HeaderProvider, HistoryWriter,
-    OriginalValuesKnown, StateProofProvider, StateWriteConfig, StateWriter,
+    OriginalValuesKnown, ProviderFactory, StateProofProvider, StateWriteConfig, StateWriter,
     StaticFileProviderFactory, StaticFileSegment, StaticFileWriter,
-    test_utils::create_test_provider_factory_with_chain_spec,
+    providers::{RocksDBBuilder, StaticFileProvider},
+    test_utils::MockNodeTypesWithDB,
 };
 use reth_revm::{State, database::StateProviderDatabase, witness::ExecutionWitnessRecord};
 use reth_trie::{HashedPostState, KeccakKeyHasher, StateRoot};
@@ -251,7 +253,7 @@ where
 {
     // Create a new test database and initialize a provider for the test case.
     let chain_spec = case.network.to_chain_spec();
-    let factory = create_test_provider_factory_with_chain_spec(chain_spec.clone());
+    let factory = create_provider_factory_with_chain_spec(chain_spec.clone());
     let provider = factory.database_provider_rw().unwrap();
 
     // Insert initial test state into the provider.
@@ -559,6 +561,35 @@ pub fn should_skip(path: &Path) -> bool {
 fn path_contains(path_str: &str, rhs: &[&str]) -> bool {
     let rhs = rhs.join(std::path::MAIN_SEPARATOR_STR);
     path_str.contains(&rhs)
+}
+
+/// Creates a provider factory with mainnet-sized MDBX geometry (8 TiB) instead of the default
+/// test geometry (64 MiB).
+fn create_provider_factory_with_chain_spec(
+    chain_spec: Arc<ChainSpec>,
+) -> ProviderFactory<MockNodeTypesWithDB> {
+    let datadir_path = reth_db::test_utils::tempdir_path();
+    let db_path = datadir_path.join("db");
+    let static_files_path = datadir_path.join("static_files");
+    let rocksdb_path = datadir_path.join("rocksdb");
+
+    std::fs::create_dir_all(&static_files_path).expect("failed to create static_files dir");
+
+    let db = init_db(&db_path, DatabaseArguments::new(ClientVersion::default()))
+        .expect("failed to init db");
+    let db = Arc::new(TempDatabase::new(db, datadir_path));
+
+    ProviderFactory::new(
+        db,
+        chain_spec,
+        StaticFileProvider::read_write(static_files_path).expect("static file provider"),
+        RocksDBBuilder::new(&rocksdb_path)
+            .with_default_tables()
+            .build()
+            .expect("failed to create test RocksDB provider"),
+        Default::default(),
+    )
+    .expect("failed to create provider factory")
 }
 
 fn execution_witness_with_parent(parent: &RecoveredBlock<Block>) -> ExecutionWitness {
