@@ -34,7 +34,7 @@ use std::{
     collections::BTreeMap,
     env, fs,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, OnceLock},
 };
 use tries::{StatelessTrie, default::StatelessSparseTrie, zeth::SparseState};
 
@@ -49,11 +49,7 @@ enum EfTestTrie {
 
 impl EfTestTrie {
     fn from_env() -> Result<Self, Error> {
-        let value = env::var(EF_TEST_TRIE_ENV_VAR).map_err(|_| {
-            Error::Assertion(format!(
-                "missing {EF_TEST_TRIE_ENV_VAR} env var; expected one of: `default`, `zeth`"
-            ))
-        })?;
+        let value = env::var(EF_TEST_TRIE_ENV_VAR).unwrap_or_else(|_| "default".to_string());
 
         match value.as_str() {
             "default" => Ok(Self::Default),
@@ -563,6 +559,12 @@ fn path_contains(path_str: &str, rhs: &[&str]) -> bool {
     path_str.contains(&rhs)
 }
 
+/// Returns a shared `Runtime` to avoid creating new rayon thread pools for every test case.
+fn shared_runtime() -> reth_tasks::Runtime {
+    static RUNTIME: OnceLock<reth_tasks::Runtime> = OnceLock::new();
+    RUNTIME.get_or_init(reth_tasks::Runtime::test).clone()
+}
+
 /// Creates a provider factory with a larger MDBX geometry (1 GiB) than the default test
 /// geometry (64 MiB), while keeping other test-friendly settings (small growth step, unbounded
 /// read transactions).
@@ -588,7 +590,7 @@ fn create_provider_factory_with_chain_spec(
             .with_default_tables()
             .build()
             .expect("failed to create test RocksDB provider"),
-        Default::default(),
+        shared_runtime(),
     )
     .expect("failed to create provider factory")
 }
