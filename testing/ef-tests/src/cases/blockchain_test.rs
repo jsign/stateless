@@ -17,35 +17,65 @@ use reth_primitives_traits::{
     Block as BlockTrait, ParallelBridgeBuffered, RecoveredBlock, SealedBlock,
 };
 use reth_provider::{
-    BlockWriter, DatabaseProviderFactory, ExecutionOutcome, HeaderProvider, HistoryWriter,
-    OriginalValuesKnown, StateProofProvider, StateWriteConfig, StateWriter,
-    StaticFileProviderFactory, StaticFileSegment, StaticFileWriter,
-    test_utils::create_test_provider_factory_with_chain_spec,
+    BlockWriter, DatabaseProviderFactory, ExecutionOutcome, HistoryWriter, OriginalValuesKnown,
+    StateWriteConfig, StateWriter, StaticFileProviderFactory, StaticFileSegment, StaticFileWriter,
+    test_utils::create_test_provider_factory_with_chain_spec_and_db_args,
 };
 use reth_revm::{State, database::StateProviderDatabase, witness::ExecutionWitnessRecord};
-use reth_trie::{HashedPostState, KeccakKeyHasher, StateRoot};
-use reth_trie_db::DatabaseStateRoot;
+use reth_trie::{ExecutionWitnessMode, HashedPostState, KeccakKeyHasher, StateRoot};
+use reth_trie_db::{
+    DatabaseHashedCursorFactory, DatabaseStateRoot, DatabaseTrieCursorFactory, LegacyKeyAdapter,
+};
 use stateless::{
-    ExecutionWitness, UncompressedPublicKey, trie::StatelessSparseTrie,
-    validation::stateless_validation_with_trie,
+    ExecutionWitness, UncompressedPublicKey, validation::stateless_validation_with_trie,
 };
 use std::{
-    collections::BTreeMap,
-    fs,
+    collections::{BTreeMap, BTreeSet},
+    env, fs,
     path::{Path, PathBuf},
     sync::Arc,
 };
+use tries::{StatelessTrie, default::StatelessSparseTrie, zeth::SparseState};
+
+/// Environment variable used by EF tests to select the trie implementation.
+const EF_TEST_TRIE_ENV_VAR: &str = "EF_TEST_TRIE";
+
+#[derive(Debug, Clone, Copy)]
+enum EfTestTrie {
+    Default,
+    Zeth,
+}
+
+impl EfTestTrie {
+    fn from_env() -> Result<Self, Error> {
+        let value = env::var(EF_TEST_TRIE_ENV_VAR).map_err(|_| {
+            Error::Assertion(format!(
+                "missing {EF_TEST_TRIE_ENV_VAR} env var; expected one of: `default`, `zeth`"
+            ))
+        })?;
+
+        match value.as_str() {
+            "default" => Ok(Self::Default),
+            "zeth" => Ok(Self::Zeth),
+            _ => Err(Error::Assertion(format!(
+                "invalid {EF_TEST_TRIE_ENV_VAR} value `{value}`; expected `default` or `zeth`"
+            ))),
+        }
+    }
+}
 
 /// A handler for the blockchain test suite.
 #[derive(Debug)]
 pub struct BlockchainTests {
     suite_path: PathBuf,
+    /// Test paths to skip (relative to `suite_path`)
+    skip_tests: BTreeSet<String>,
 }
 
 impl BlockchainTests {
     /// Create a new suite for tests with blockchain tests format.
-    pub const fn new(suite_path: PathBuf) -> Self {
-        Self { suite_path }
+    pub fn new(suite_path: PathBuf, skip_tests: BTreeSet<String>) -> Self {
+        Self { suite_path, skip_tests }
     }
 }
 
@@ -54,6 +84,17 @@ impl Suite for BlockchainTests {
 
     fn suite_path(&self) -> &Path {
         &self.suite_path
+    }
+
+    fn should_skip(&self, path: &Path) -> bool {
+        if self.skip_tests.is_empty() {
+            return false;
+        }
+        // Match against the path relative to the suite root directory.
+        path.strip_prefix(&self.suite_path)
+            .ok()
+            .and_then(|rel| rel.to_str())
+            .is_some_and(|rel| self.skip_tests.contains(rel))
     }
 }
 
@@ -109,9 +150,10 @@ impl BlockchainTestCase {
     pub fn run_single_case(
         name: &str,
         case: &BlockchainTest,
+        witness_mode: ExecutionWitnessMode,
     ) -> Result<Vec<(RecoveredBlock<Block>, ExecutionWitness)>, Error> {
         let expectation = Self::expected_failure(case);
-        match run_case(case) {
+        match run_case(case, witness_mode) {
             // All blocks executed successfully.
             Ok(program_inputs) => {
                 // Check if the test case specifies that it should have failed
@@ -173,6 +215,14 @@ impl Case for BlockchainTestCase {
         })
     }
 
+    fn test_names(&self) -> Vec<&str> {
+        self.tests.keys().map(|s| s.as_str()).collect()
+    }
+
+    fn filter_by_name(&mut self, filter: &str) {
+        self.tests.retain(|name, _| name.contains(filter));
+    }
+
     /// Runs the test cases for the Ethereum Forks test suite.
     ///
     /// # Errors
@@ -189,7 +239,14 @@ impl Case for BlockchainTestCase {
             .filter(|(_, case)| !Self::excluded_fork(case.network))
             .par_bridge_buffered()
             .with_min_len(64)
-            .try_for_each(|(name, case)| Self::run_single_case(&name, &case).map(|_| ()))
+            .try_for_each(|(name, case)| {
+                Self::run_single_case(&name, &case, ExecutionWitnessMode::Canonical)
+                    .map(|_| ())
+                    .map_err(|err| Error::TestCaseFailed {
+                        name: name.to_owned(),
+                        err: Box::new(err),
+                    })
+            })
     }
 }
 
@@ -209,10 +266,27 @@ impl Case for BlockchainTestCase {
 ///   witness if the error is of variant `BlockProcessingFailed`.
 fn run_case(
     case: &BlockchainTest,
+    witness_mode: ExecutionWitnessMode,
 ) -> Result<Vec<(RecoveredBlock<Block>, ExecutionWitness)>, Error> {
+    match EfTestTrie::from_env()? {
+        EfTestTrie::Default => run_case_with_trie::<StatelessSparseTrie>(case, witness_mode),
+        EfTestTrie::Zeth => run_case_with_trie::<SparseState>(case, witness_mode),
+    }
+}
+
+fn run_case_with_trie<T>(
+    case: &BlockchainTest,
+    witness_mode: ExecutionWitnessMode,
+) -> Result<Vec<(RecoveredBlock<Block>, ExecutionWitness)>, Error>
+where
+    T: StatelessTrie,
+{
     // Create a new test database and initialize a provider for the test case.
     let chain_spec = case.network.to_chain_spec();
-    let factory = create_test_provider_factory_with_chain_spec(chain_spec.clone());
+    let factory = create_test_provider_factory_with_chain_spec_and_db_args(
+        chain_spec.clone(),
+        reth_db::mdbx::DatabaseArguments::test().with_geometry_max_size(Some(1024 * 1024 * 1024)),
+    );
     let provider = factory.database_provider_rw().unwrap();
 
     // Insert initial test state into the provider.
@@ -278,7 +352,7 @@ fn run_case(
 
         let output = executor
             .execute_with_state_closure_always(&(*block).clone(), |statedb: &State<_>| {
-                witness_record.record_executed_state(statedb);
+                witness_record.record_executed_state(statedb, witness_mode);
             })
             .map_err(|err| Error::block_failed(block_number, program_inputs.clone(), err))?;
 
@@ -287,36 +361,30 @@ fn run_case(
             .map_err(|err| Error::block_failed(block_number, program_inputs.clone(), err))?;
 
         // Generate the stateless witness
-        // TODO: Most of this code is copy-pasted from debug_executionWitness
-        let ExecutionWitnessRecord { hashed_state, codes, keys, lowest_block_number } =
-            witness_record;
-        let state = state_provider.witness(Default::default(), hashed_state)?;
-        let mut exec_witness = ExecutionWitness { state, codes, keys, headers: Default::default() };
-
-        let smallest = lowest_block_number.unwrap_or_else(|| {
-            // Return only the parent header, if there were no calls to the
-            // BLOCKHASH opcode.
-            block_number.saturating_sub(1)
-        });
-
-        let range = smallest..block_number;
-
-        exec_witness.headers = provider
-            .headers_range(range)?
-            .into_iter()
-            .map(|header| {
-                let mut serialized_header = Vec::new();
-                header.encode(&mut serialized_header);
-                serialized_header.into()
-            })
-            .collect();
+        let exec_witness = witness_record.into_execution_witness(
+            &state_provider,
+            &provider,
+            block_number,
+            witness_mode,
+        )?;
 
         program_inputs.push((block.clone(), exec_witness));
+
+        // Compare the generated witness against the fixture's expected witness (if present)
+        if let Some(expected_witness) = &case.blocks[block_index].execution_witness {
+            let (_, exec_witness) = program_inputs.last().unwrap();
+            expected_witness
+                .assert_matches(exec_witness)
+                .map_err(|err| Error::block_failed(block_number, program_inputs.clone(), err))?;
+        }
 
         // Compute and check the post state root
         let hashed_state =
             HashedPostState::from_bundle_state::<KeccakKeyHasher>(output.state.state());
-        let (computed_state_root, _) = StateRoot::overlay_root_with_updates(
+        let (computed_state_root, _) = <StateRoot<
+            DatabaseTrieCursorFactory<_, LegacyKeyAdapter>,
+            DatabaseHashedCursorFactory<_>,
+        > as DatabaseStateRoot<_>>::overlay_root_with_updates(
             provider.tx_ref(),
             &hashed_state.clone_into_sorted(),
         )
@@ -378,7 +446,7 @@ fn run_case(
         let public_keys = recover_signers(block.body().transactions())
             .expect("Failed to recover public keys from transaction signatures");
 
-        stateless_validation_with_trie::<StatelessSparseTrie, _, _>(
+        stateless_validation_with_trie::<T, _, _>(
             block,
             public_keys,
             execution_witness.clone(),

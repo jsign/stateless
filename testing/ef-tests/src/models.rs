@@ -1,6 +1,9 @@
 //! Shared models for <https://github.com/ethereum/tests>
 
-use crate::{Error, assert::assert_equal};
+use crate::{
+    Error,
+    assert::{assert_equal, assert_equal_bytes_vecs},
+};
 use alloy_consensus::Header as RethHeader;
 use alloy_eips::eip4895::Withdrawals;
 use alloy_genesis::GenesisAccount;
@@ -8,8 +11,8 @@ use alloy_primitives::{Address, B64, B256, Bloom, Bytes, U256, keccak256};
 use reth_chainspec::{ChainSpec, ChainSpecBuilder, EthereumHardfork, ForkCondition};
 use reth_db_api::{cursor::DbDupCursorRO, tables, transaction::DbTx};
 use reth_primitives_traits::SealedHeader;
-use revm::primitives::HashMap;
 use serde::Deserialize;
+use stateless::ExecutionWitness;
 use std::{
     collections::BTreeMap,
     ops::Deref,
@@ -141,6 +144,46 @@ pub struct Block {
     pub transaction_sequence: Option<Vec<TransactionSequence>>,
     /// Withdrawals
     pub withdrawals: Option<Withdrawals>,
+    /// Execution witness for stateless validation.
+    pub execution_witness: Option<FixtureExecutionWitness>,
+}
+
+/// Execution witness from test fixtures.
+///
+/// Uses serde aliases to accept both alloy's field names (`state`/`codes`/`headers`)
+/// and the fixture's field names (`nodes`/`bytecodes`/`ancestors`).
+#[derive(Debug, PartialEq, Eq, Clone, Deserialize, Default)]
+pub struct FixtureExecutionWitness {
+    /// Trie nodes / state witness.
+    #[serde(alias = "nodes", default)]
+    pub state: Vec<Bytes>,
+    /// Contract bytecodes.
+    #[serde(alias = "bytecodes", default)]
+    pub codes: Vec<Bytes>,
+    /// Ancestor block headers.
+    #[serde(alias = "ancestors", default)]
+    pub headers: Vec<Bytes>,
+}
+
+impl FixtureExecutionWitness {
+    /// Asserts that the generated [`ExecutionWitness`] matches this fixture witness.
+    ///
+    /// Compares `state`, `codes`, and `headers` fields individually (sorted).
+    /// The `keys` field from the generated witness is ignored since fixtures don't include it.
+    pub fn assert_matches(&self, generated: &ExecutionWitness) -> Result<(), Error> {
+        assert_equal_bytes_vecs(&self.state, &generated.state, "execution witness state (nodes)")?;
+        assert_equal_bytes_vecs(
+            &self.codes,
+            &generated.codes,
+            "execution witness codes (bytecodes)",
+        )?;
+        assert_equal_bytes_vecs(
+            &self.headers,
+            &generated.headers,
+            "execution witness headers (ancestors)",
+        )?;
+        Ok(())
+    }
 }
 
 /// Transaction sequence in block
@@ -324,12 +367,20 @@ pub enum ForkSpec {
     Prague,
     /// Osaka
     Osaka,
+    /// Prague to Osaka at time 15k
+    PragueToOsakaAtTime15k,
+    /// Osaka to BPO1 at time 15k
+    #[serde(alias = "OsakaToBPO1AtTime15k")]
+    OsakaToBpo1AtTime15k,
+    /// BPO1 to BPO2 at time 15k
+    #[serde(alias = "BPO1ToBPO2AtTime15k")]
+    Bpo1ToBpo2AtTime15k,
 }
 
 impl ForkSpec {
     /// Converts this EF fork spec to a Reth [`ChainSpec`].
     pub fn to_chain_spec(self) -> Arc<ChainSpec> {
-        static MAP: OnceLock<RwLock<HashMap<ForkSpec, Arc<ChainSpec>>>> = OnceLock::new();
+        static MAP: OnceLock<RwLock<BTreeMap<ForkSpec, Arc<ChainSpec>>>> = OnceLock::new();
         let map = MAP.get_or_init(Default::default);
         if let Some(r) = map.read().unwrap().get(&self) {
             return r.clone();
@@ -391,7 +442,17 @@ impl ForkSpec {
                 .cancun_activated()
                 .with_fork(EthereumHardfork::Prague, ForkCondition::Timestamp(15_000)),
             Self::Prague => spec_builder.prague_activated(),
+            Self::PragueToOsakaAtTime15k => spec_builder
+                .prague_activated()
+                .with_fork(EthereumHardfork::Osaka, ForkCondition::Timestamp(15_000)),
             Self::Osaka => spec_builder.osaka_activated(),
+            Self::OsakaToBpo1AtTime15k => spec_builder
+                .osaka_activated()
+                .with_fork(EthereumHardfork::Bpo1, ForkCondition::Timestamp(15_000)),
+            Self::Bpo1ToBpo2AtTime15k => spec_builder
+                .osaka_activated()
+                .with_fork(EthereumHardfork::Bpo1, ForkCondition::Timestamp(0))
+                .with_fork(EthereumHardfork::Bpo2, ForkCondition::Timestamp(15_000)),
         }
         .build()
     }

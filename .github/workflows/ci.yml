@@ -8,6 +8,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  LIBZ_SYS_STATIC: 0
 
 jobs:
   lint:
@@ -28,9 +29,18 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   ef-tests:
-    name: Ethereum Foundation tests
+    name: Ethereum Foundation tests (${{ matrix.trie }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    continue-on-error: ${{ matrix.allow_failure }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - trie: default
+            allow_failure: false
+          - trie: zeth
+            allow_failure: true
     env:
       RUST_LOG: info,sync=error
       RUST_BACKTRACE: 1
@@ -42,7 +52,25 @@ jobs:
         with:
           cache-on-failure: true
       - name: Run EF tests
-        run: ./scripts/run_ef_tests.sh
+        run: ./scripts/run_ef_tests.sh ${{ matrix.trie }}
+
+  execution-witness-tests:
+    name: Execution Witness tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      RUST_LOG: info
+      RUST_BACKTRACE: 1
+      EF_TEST_TRIE: default
+      EXECUTION_WITNESS_TESTS_URL: https://github.com/jsign/artifacts/releases/download/execution_witness_v0.0.1/execution_witness_tests_409fae8.tar.gz
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: Run Execution Witness tests
+        run: cargo run -p ef-test-runner --release -- --skip testing/runner/execution-witness-skip.txt $EXECUTION_WITNESS_TESTS_URL
 
   no-std:
     name: no_std (RISC-V)
