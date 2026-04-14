@@ -4,10 +4,9 @@ use crate::{
     Case, Error, Suite,
     models::{BlockchainTest, ForkSpec},
 };
-use alloy_consensus::BlockHeader;
 use alloy_rlp::{Decodable, Encodable};
 use rayon::iter::{IndexedParallelIterator, ParallelIterator};
-use reth_chainspec::{ChainSpec, EthereumHardforks};
+use reth_chainspec::ChainSpec;
 use reth_consensus::{Consensus, HeaderValidator};
 use reth_db_common::init::{insert_genesis_hashes, insert_genesis_history, insert_genesis_state};
 use reth_ethereum_consensus::{EthBeaconConsensus, validate_block_post_execution};
@@ -325,8 +324,6 @@ where
             .map_err(|err| Error::block_failed(block_number, program_inputs.clone(), err))?;
 
         let block_access_list = executor.take_bal();
-        let allow_bal_check =
-            chain_spec.is_amsterdam_active_at_timestamp(block.header().timestamp());
 
         let mut state = executor.into_state();
         witness_record.record_executed_state(&state);
@@ -340,7 +337,6 @@ where
             &output.requests,
             None,
             &block_access_list,
-            allow_bal_check,
             Some(output.gas_used),
         )
         .map_err(|err| Error::block_failed(block_number, program_inputs.clone(), err))?;
