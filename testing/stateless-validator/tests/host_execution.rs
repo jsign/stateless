@@ -7,9 +7,10 @@ use stateless_validator_tests::{
 
 /// Tests whose fixtures fail on upstream EIP-7928 block access list bugs, matched by test name.
 ///
-/// alloy-evm runs the post-execution system calls before crediting withdrawals, the reverse of
-/// EELS `apply_body`, and revm's BAL builder drops a write when a later commit at the same block
-/// access index only reads it (<https://github.com/bluealloy/revm/pull/3954>).
+/// - alloy-evm runs the post-execution system calls before it credits withdrawals, the reverse of
+///   EELS `apply_body`.
+/// - revm's BAL builder records a change when a value returns to its start-of-index value within
+///   one block access index. EELS records no change, or a storage read.
 const KNOWN_FAILURES: &[&str] = &[
     "test_bal_post_execution_calls_net_storage_at_last_index[",
     "test_bal_withdrawals_and_dequeues_net_balance_at_last_index[",
