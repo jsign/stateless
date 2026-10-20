@@ -420,6 +420,10 @@ fn decode_path(buf: &mut &[u8]) -> alloy_rlp::Result<(Nibbles, bool)> {
         0b0011 => (true, true),
         _ => return Err(alloy_rlp::Error::Custom("node is not an extension or leaf")),
     };
+    // `Nibbles` holds at most 64 nibbles, the length of a hashed key.
+    if 2 * (compact.len() - 1) + usize::from(odd_len) > 2 * B256::len_bytes() {
+        return Err(alloy_rlp::Error::Custom("path exceeds 64 nibbles"));
+    }
     // Strip the HP prefix: for odd length, the first nibble of the key is in the low nibble
     // of the first byte; for even length, skip the first byte entirely.
     let nibbles = if odd_len {

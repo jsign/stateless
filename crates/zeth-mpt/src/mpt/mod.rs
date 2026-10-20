@@ -97,6 +97,20 @@ impl Trie {
         self.0.size()
     }
 
+    /// Checks that every resolved path from the root is exactly `key_len` nibbles long.
+    ///
+    /// Unresolved nodes are not checked. A trie keyed by hashes, such as the state trie or a
+    /// storage trie, has a key length of 64 nibbles.
+    ///
+    /// # Errors
+    ///
+    /// This function returns an error if a leaf ends before or after `key_len` nibbles, or if an
+    /// extension or branch node leaves no nibbles for its child.
+    #[inline]
+    pub fn validate_key_len(&self, key_len: usize) -> alloy_rlp::Result<()> {
+        self.0.validate_key_len(key_len)
+    }
+
     /// Computes and returns the hash of the trie's root node.
     #[inline]
     pub fn hash_slow(&self) -> B256 {
@@ -300,6 +314,14 @@ impl CachedTrie {
     #[inline]
     pub fn size(&self) -> usize {
         self.inner.size()
+    }
+
+    /// Checks that every resolved path from the root is exactly `key_len` nibbles long.
+    ///
+    /// See [`Trie::validate_key_len`] for detailed documentation.
+    #[inline]
+    pub fn validate_key_len(&self, key_len: usize) -> alloy_rlp::Result<()> {
+        self.inner.validate_key_len(key_len)
     }
 
     /// Computes and returns the hash of the trie's root node.
@@ -534,6 +556,48 @@ mod tests {
         assert_eq!(trie.get([]), None);
         assert_eq!(trie.get([0]), None);
         assert_eq!(trie.get([1, 2, 3]), None);
+    }
+
+    #[test]
+    fn validate_key_len() {
+        let leaf = |len| Node::Leaf(Nibbles::from_nibbles(vec![0; len]), vec![0].into(), NoCache);
+        let branch = |len| Node::Branch(Children::from([(0, leaf(len)), (1, leaf(len))]), NoCache);
+        let extension = |len, child: Node<NoCache>| {
+            Node::Extension(Nibbles::from_nibbles(vec![0; len]), child.into(), NoCache)
+        };
+
+        assert!(Trie(Node::Null).validate_key_len(64).is_ok());
+        assert!(Trie::from_digest(B256::ZERO).validate_key_len(64).is_ok());
+        assert!(Trie(leaf(64)).validate_key_len(64).is_ok());
+        assert!(Trie(branch(63)).validate_key_len(64).is_ok());
+        assert!(Trie(extension(1, branch(62))).validate_key_len(64).is_ok());
+
+        // leaves must end exactly at the key length
+        assert!(Trie(leaf(63)).validate_key_len(64).is_err());
+        assert!(Trie(branch(62)).validate_key_len(64).is_err());
+        assert!(Trie(branch(64)).validate_key_len(64).is_err());
+        assert!(Trie(extension(1, branch(63))).validate_key_len(64).is_err());
+
+        // extensions and branches must leave at least one nibble for their children
+        let digests = || {
+            let children =
+                Children::from([(0, Node::Digest(B256::ZERO)), (1, Node::Digest(B256::ZERO))]);
+            Node::Branch(children, NoCache)
+        };
+        assert!(Trie(extension(63, digests())).validate_key_len(64).is_ok());
+        assert!(Trie(extension(64, Node::Digest(B256::ZERO))).validate_key_len(64).is_err());
+        assert!(Trie(digests()).validate_key_len(0).is_err());
+    }
+
+    #[test]
+    fn decode_path_longer_than_hashed_key() {
+        let leaf_rlp =
+            |compact: Vec<u8>| alloy_rlp::encode(vec![Bytes::from(compact), Bytes::from([1])]);
+
+        // 64 nibbles is the longest path that fits a hashed key
+        assert!(Trie::from_rlp([leaf_rlp([[0x20].as_slice(), &[0; 32]].concat())]).is_ok());
+        assert!(Trie::from_rlp([leaf_rlp([[0x30].as_slice(), &[0; 32]].concat())]).is_err());
+        assert!(Trie::from_rlp([leaf_rlp([[0x30].as_slice(), &[0; 33]].concat())]).is_err());
     }
 
     #[test]
