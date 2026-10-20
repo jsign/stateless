@@ -124,7 +124,7 @@ impl Trie {
         nodes: impl IntoIterator<Item = T>,
     ) -> alloy_rlp::Result<()> {
         let rlp_by_digest = nodes.into_iter().map(|rlp| (keccak256(&rlp), rlp)).collect();
-        self.0.resolve_digests(&rlp_by_digest)
+        self.0.resolve_digests(&rlp_by_digest, None)
     }
 
     /// Converts the trie into a [CachedTrie].
@@ -201,7 +201,7 @@ impl Trie {
         rlp_by_digest: &B256IndexMap<impl AsRef<[u8]>>,
     ) -> alloy_rlp::Result<Self> {
         let mut trie = Self::from_digest(root);
-        trie.0.resolve_digests(rlp_by_digest)?;
+        trie.0.resolve_digests(rlp_by_digest, None)?;
         Ok(trie)
     }
 }
@@ -355,7 +355,7 @@ impl CachedTrie {
         nodes: impl IntoIterator<Item = T>,
     ) -> alloy_rlp::Result<()> {
         let rlp_by_digest = nodes.into_iter().map(|rlp| (keccak256(&rlp), rlp)).collect();
-        self.inner.resolve_digests(&rlp_by_digest)
+        self.inner.resolve_digests(&rlp_by_digest, None)
     }
 
     /// Returns the RLP-encoded nodes of the trie in preorder.
@@ -395,7 +395,28 @@ impl CachedTrie {
         rlp_by_digest: &B256IndexMap<impl AsRef<[u8]>>,
     ) -> alloy_rlp::Result<Self> {
         let mut trie = Self::from_digest(root);
-        trie.inner.resolve_digests(rlp_by_digest)?;
+        trie.inner.resolve_digests(rlp_by_digest, None)?;
+        Ok(trie)
+    }
+
+    /// Creates a new trie like [`CachedTrie::from_prehashed_nodes`] whose keys are all `key_len`
+    /// nibbles long, such as the state trie or a storage trie, whose keys are 64-nibble hashes.
+    ///
+    /// The check runs while the nodes are resolved and skips unresolved nodes.
+    ///
+    /// # Errors
+    ///
+    /// This function returns an error if [`CachedTrie::from_prehashed_nodes`] does, if a leaf ends
+    /// before or after `key_len` nibbles, or if an extension or branch node leaves no nibbles for
+    /// its child.
+    #[inline]
+    pub fn from_prehashed_nodes_with_key_len(
+        root: B256,
+        rlp_by_digest: &B256IndexMap<impl AsRef<[u8]>>,
+        key_len: usize,
+    ) -> alloy_rlp::Result<Self> {
+        let mut trie = Self::from_digest(root);
+        trie.inner.resolve_digests(rlp_by_digest, Some(key_len))?;
         Ok(trie)
     }
 }
@@ -534,6 +555,58 @@ mod tests {
         assert_eq!(trie.get([]), None);
         assert_eq!(trie.get([0]), None);
         assert_eq!(trie.get([1, 2, 3]), None);
+    }
+
+    #[test]
+    fn from_prehashed_nodes_with_key_len() {
+        let leaf = |len| Node::Leaf(Nibbles::from_nibbles(vec![0; len]), vec![0].into(), NoCache);
+        let branch = |len| Node::Branch(Children::from([(0, leaf(len)), (1, leaf(len))]), NoCache);
+        let extension = |len, child: Node<NoCache>| {
+            Node::Extension(Nibbles::from_nibbles(vec![0; len]), child.into(), NoCache)
+        };
+        // rebuilds the trie from its RLP nodes, checking the key length while resolving them
+        let rebuild = |root: Node<NoCache>, key_len| {
+            let trie = Trie(root);
+            let rlp_by_digest: B256IndexMap<_> =
+                trie.rlp_nodes().into_iter().map(|rlp| (keccak256(&rlp), rlp)).collect();
+            CachedTrie::from_prehashed_nodes_with_key_len(trie.hash_slow(), &rlp_by_digest, key_len)
+        };
+
+        assert!(rebuild(Node::Null, 64).is_ok());
+        assert!(rebuild(Node::Digest(B256::ZERO), 64).is_ok());
+        assert!(rebuild(leaf(64), 64).is_ok());
+        assert!(rebuild(branch(63), 64).is_ok());
+        assert!(rebuild(extension(1, branch(62)), 64).is_ok());
+        // the leaves of this branch are short enough to be inlined into it
+        assert!(rebuild(branch(1), 2).is_ok());
+
+        // leaves must end exactly at the key length
+        assert!(rebuild(leaf(63), 64).is_err());
+        assert!(rebuild(branch(62), 64).is_err());
+        assert!(rebuild(branch(64), 64).is_err());
+        assert!(rebuild(extension(1, branch(63)), 64).is_err());
+        assert!(rebuild(branch(1), 3).is_err());
+
+        // extensions and branches must leave at least one nibble for their children
+        let digests = || {
+            let children =
+                Children::from([(0, Node::Digest(B256::ZERO)), (1, Node::Digest(B256::ZERO))]);
+            Node::Branch(children, NoCache)
+        };
+        assert!(rebuild(extension(63, digests()), 64).is_ok());
+        assert!(rebuild(extension(64, Node::Digest(B256::ZERO)), 64).is_err());
+        assert!(rebuild(digests(), 0).is_err());
+    }
+
+    #[test]
+    fn decode_path_longer_than_hashed_key() {
+        let leaf_rlp =
+            |compact: Vec<u8>| alloy_rlp::encode(vec![Bytes::from(compact), Bytes::from([1])]);
+
+        // 64 nibbles is the longest path that fits a hashed key
+        assert!(Trie::from_rlp([leaf_rlp([[0x20].as_slice(), &[0; 32]].concat())]).is_ok());
+        assert!(Trie::from_rlp([leaf_rlp([[0x30].as_slice(), &[0; 32]].concat())]).is_err());
+        assert!(Trie::from_rlp([leaf_rlp([[0x30].as_slice(), &[0; 33]].concat())]).is_err());
     }
 
     #[test]

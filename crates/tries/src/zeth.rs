@@ -43,7 +43,9 @@ impl<T: alloy_rlp::Decodable + alloy_rlp::Encodable> RlpTrie<T> {
         root: B256,
         rlp_by_digest: &B256IndexMap<impl AsRef<[u8]>>,
     ) -> alloy_rlp::Result<Self> {
-        Ok(Self::new(CachedTrie::from_prehashed_nodes(root, rlp_by_digest)?))
+        // state and storage tries are keyed by Keccak-256 hashes, so each path has 64 nibbles
+        let key_len = 2 * B256::len_bytes();
+        Ok(Self::new(CachedTrie::from_prehashed_nodes_with_key_len(root, rlp_by_digest, key_len)?))
     }
 
     pub fn get(&self, key: impl AsRef<[u8]>) -> alloy_rlp::Result<Option<T>> {

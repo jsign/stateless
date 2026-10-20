@@ -121,7 +121,8 @@ impl<M: Memoization + Clone> Node<M> {
                 // any orphan must be a Leaf with the suffix as a prefix
                 let sibling = Node::Leaf(suffix.into(), value.clone(), M::default());
                 let rlp = sibling.rlp_encoded();
-                self.resolve_digests(&B256IndexMap::from_iter([(keccak256(&rlp), rlp)])).unwrap();
+                self.resolve_digests(&B256IndexMap::from_iter([(keccak256(&rlp), rlp)]), None)
+                    .unwrap();
             }
             Node::Extension(prefix, child, _) => {
                 // get the unmatched part of the Extension-prefix
@@ -143,8 +144,11 @@ impl<M: Memoization + Clone> Node<M> {
                     // the child still corresponds to the node we are looking for.
                     if !matches!(**child, Node::Digest(_)) {
                         let rlp = child.rlp_encoded();
-                        self.resolve_digests(&B256IndexMap::from_iter([(keccak256(&rlp), rlp)]))
-                            .unwrap();
+                        self.resolve_digests(
+                            &B256IndexMap::from_iter([(keccak256(&rlp), rlp)]),
+                            None,
+                        )
+                        .unwrap();
                     }
                     // the path to the orphan corresponds exactly to the path of the Extension-child
                     let orphan_prefix = matched.join(prefix);
@@ -160,7 +164,8 @@ impl<M: Memoization + Clone> Node<M> {
                 // any potential orphan must be an Extension with the (non-empty) suffix as a prefix
                 let sibling = Node::Extension(suffix.into(), (*child).clone(), M::default());
                 let rlp = sibling.rlp_encoded();
-                self.resolve_digests(&B256IndexMap::from_iter([(keccak256(&rlp), rlp)])).unwrap();
+                self.resolve_digests(&B256IndexMap::from_iter([(keccak256(&rlp), rlp)]), None)
+                    .unwrap();
             }
             Node::Digest(_) => {
                 // the proof is invalid, as it does not proof the non-inclusion of `key`

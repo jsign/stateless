@@ -178,27 +178,43 @@ impl<M: Memoization> Node<M> {
         }
 
         // return the resolved trie
-        root.resolve_digests(&rlp_by_digest)?;
+        root.resolve_digests(&rlp_by_digest, None)?;
         Ok(root)
     }
 
-    /// Resolves all applicable digest nodes with the node corresponding to the RLP encoding.
+    /// Resolves all applicable digest nodes with the node corresponding to the RLP encoding. If
+    /// `key_len` is set, it also checks that every resolved path below this node is exactly
+    /// `key_len` nibbles long.
     pub(super) fn resolve_digests(
         &mut self,
         rlp_by_digest: &B256IndexMap<impl AsRef<[u8]>>,
+        key_len: Option<usize>,
     ) -> alloy_rlp::Result<()> {
         match self {
-            Node::Null | Node::Leaf(..) => {}
-            Node::Extension(_, child, _) => {
-                child.resolve_digests(rlp_by_digest)?;
+            Node::Null => {}
+            Node::Leaf(prefix, ..) => {
+                if key_len.is_some_and(|len| prefix.len() != len) {
+                    return Err(alloy_rlp::Error::Custom("leaf path does not match key length"));
+                }
+            }
+            Node::Extension(prefix, child, _) => {
+                if key_len.is_some_and(|len| prefix.len() >= len) {
+                    return Err(alloy_rlp::Error::Custom("extension path exceeds key length"));
+                }
+                let child_key_len = key_len.map(|len| len - prefix.len());
+                child.resolve_digests(rlp_by_digest, child_key_len)?;
                 if !matches!(**child, Node::Branch(..) | Node::Digest(..)) {
                     return Err(alloy_rlp::Error::Custom("extension node with invalid child"));
                 }
             }
             Node::Branch(children, _) => {
+                if key_len == Some(0) {
+                    return Err(alloy_rlp::Error::Custom("branch node exceeds key length"));
+                }
+                let child_key_len = key_len.map(|len| len - 1);
                 for entry in children.entries() {
                     if let Entry::Occupied(mut entry) = entry {
-                        entry.get_mut().resolve_digests(rlp_by_digest)?;
+                        entry.get_mut().resolve_digests(rlp_by_digest, child_key_len)?;
                     }
                 }
             }
@@ -209,7 +225,7 @@ impl<M: Memoization> Node<M> {
                     if !matches!(node, Node::Digest(_)) {
                         node.cache_set(RlpNode::from_digest(digest));
                         *self = node;
-                        self.resolve_digests(rlp_by_digest)?;
+                        self.resolve_digests(rlp_by_digest, key_len)?;
                     }
                 }
             }
@@ -420,6 +436,10 @@ fn decode_path(buf: &mut &[u8]) -> alloy_rlp::Result<(Nibbles, bool)> {
         0b0011 => (true, true),
         _ => return Err(alloy_rlp::Error::Custom("node is not an extension or leaf")),
     };
+    // `Nibbles` holds at most 64 nibbles, the length of a hashed key.
+    if 2 * (compact.len() - 1) + usize::from(odd_len) > 2 * B256::len_bytes() {
+        return Err(alloy_rlp::Error::Custom("path exceeds 64 nibbles"));
+    }
     // Strip the HP prefix: for odd length, the first nibble of the key is in the low nibble
     // of the first byte; for even length, skip the first byte entirely.
     let nibbles = if odd_len {
