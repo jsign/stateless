@@ -124,7 +124,7 @@ impl Trie {
         nodes: impl IntoIterator<Item = T>,
     ) -> alloy_rlp::Result<()> {
         let rlp_by_digest = nodes.into_iter().map(|rlp| (keccak256(&rlp), rlp)).collect();
-        self.0.resolve_digests(&rlp_by_digest)
+        self.0.resolve_digests(&rlp_by_digest, None)
     }
 
     /// Converts the trie into a [CachedTrie].
@@ -201,7 +201,7 @@ impl Trie {
         rlp_by_digest: &B256IndexMap<impl AsRef<[u8]>>,
     ) -> alloy_rlp::Result<Self> {
         let mut trie = Self::from_digest(root);
-        trie.0.resolve_digests(rlp_by_digest)?;
+        trie.0.resolve_digests(rlp_by_digest, None)?;
         Ok(trie)
     }
 }
@@ -355,7 +355,7 @@ impl CachedTrie {
         nodes: impl IntoIterator<Item = T>,
     ) -> alloy_rlp::Result<()> {
         let rlp_by_digest = nodes.into_iter().map(|rlp| (keccak256(&rlp), rlp)).collect();
-        self.inner.resolve_digests(&rlp_by_digest)
+        self.inner.resolve_digests(&rlp_by_digest, None)
     }
 
     /// Returns the RLP-encoded nodes of the trie in preorder.
@@ -395,7 +395,7 @@ impl CachedTrie {
         rlp_by_digest: &B256IndexMap<impl AsRef<[u8]>>,
     ) -> alloy_rlp::Result<Self> {
         let mut trie = Self::from_digest(root);
-        trie.inner.resolve_digests(rlp_by_digest)?;
+        trie.inner.resolve_digests(rlp_by_digest, None)?;
         Ok(trie)
     }
 
@@ -416,7 +416,7 @@ impl CachedTrie {
         key_len: usize,
     ) -> alloy_rlp::Result<Self> {
         let mut trie = Self::from_digest(root);
-        trie.inner.resolve_digests_with_key_len(rlp_by_digest, Some(key_len))?;
+        trie.inner.resolve_digests(rlp_by_digest, Some(key_len))?;
         Ok(trie)
     }
 }

@@ -178,21 +178,14 @@ impl<M: Memoization> Node<M> {
         }
 
         // return the resolved trie
-        root.resolve_digests(&rlp_by_digest)?;
+        root.resolve_digests(&rlp_by_digest, None)?;
         Ok(root)
     }
 
-    /// Resolves all applicable digest nodes with the node corresponding to the RLP encoding.
+    /// Resolves all applicable digest nodes with the node corresponding to the RLP encoding. If
+    /// `key_len` is set, it also checks that every resolved path below this node is exactly
+    /// `key_len` nibbles long.
     pub(super) fn resolve_digests(
-        &mut self,
-        rlp_by_digest: &B256IndexMap<impl AsRef<[u8]>>,
-    ) -> alloy_rlp::Result<()> {
-        self.resolve_digests_with_key_len(rlp_by_digest, None)
-    }
-
-    /// Resolves digests like [`Self::resolve_digests`]. If `key_len` is set, it also checks that
-    /// every resolved path below this node is exactly `key_len` nibbles long.
-    pub(super) fn resolve_digests_with_key_len(
         &mut self,
         rlp_by_digest: &B256IndexMap<impl AsRef<[u8]>>,
         key_len: Option<usize>,
@@ -209,7 +202,7 @@ impl<M: Memoization> Node<M> {
                     return Err(alloy_rlp::Error::Custom("extension path exceeds key length"));
                 }
                 let child_key_len = key_len.map(|len| len - prefix.len());
-                child.resolve_digests_with_key_len(rlp_by_digest, child_key_len)?;
+                child.resolve_digests(rlp_by_digest, child_key_len)?;
                 if !matches!(**child, Node::Branch(..) | Node::Digest(..)) {
                     return Err(alloy_rlp::Error::Custom("extension node with invalid child"));
                 }
@@ -221,9 +214,7 @@ impl<M: Memoization> Node<M> {
                 let child_key_len = key_len.map(|len| len - 1);
                 for entry in children.entries() {
                     if let Entry::Occupied(mut entry) = entry {
-                        entry
-                            .get_mut()
-                            .resolve_digests_with_key_len(rlp_by_digest, child_key_len)?;
+                        entry.get_mut().resolve_digests(rlp_by_digest, child_key_len)?;
                     }
                 }
             }
@@ -234,7 +225,7 @@ impl<M: Memoization> Node<M> {
                     if !matches!(node, Node::Digest(_)) {
                         node.cache_set(RlpNode::from_digest(digest));
                         *self = node;
-                        self.resolve_digests_with_key_len(rlp_by_digest, key_len)?;
+                        self.resolve_digests(rlp_by_digest, key_len)?;
                     }
                 }
             }
