@@ -292,20 +292,4 @@ impl<M: Memoization> Node<M> {
             }
         }
     }
-
-    /// Checks that every resolved path below this node is exactly `key_len` nibbles long.
-    pub(super) fn validate_key_len(&self, key_len: usize) -> alloy_rlp::Result<()> {
-        match self {
-            Node::Null | Node::Digest(_) => Ok(()),
-            Node::Leaf(prefix, ..) if prefix.len() == key_len => Ok(()),
-            Node::Extension(prefix, child, _) if prefix.len() < key_len => {
-                child.validate_key_len(key_len - prefix.len())
-            }
-            Node::Branch(children, _) if key_len > 0 => children
-                .iter()
-                .filter_map(Option::as_deref)
-                .try_for_each(|child| child.validate_key_len(key_len - 1)),
-            _ => Err(alloy_rlp::Error::Custom("MPT: path does not match key length")),
-        }
-    }
 }

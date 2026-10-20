@@ -97,20 +97,6 @@ impl Trie {
         self.0.size()
     }
 
-    /// Checks that every resolved path from the root is exactly `key_len` nibbles long.
-    ///
-    /// Unresolved nodes are not checked. A trie keyed by hashes, such as the state trie or a
-    /// storage trie, has a key length of 64 nibbles.
-    ///
-    /// # Errors
-    ///
-    /// This function returns an error if a leaf ends before or after `key_len` nibbles, or if an
-    /// extension or branch node leaves no nibbles for its child.
-    #[inline]
-    pub fn validate_key_len(&self, key_len: usize) -> alloy_rlp::Result<()> {
-        self.0.validate_key_len(key_len)
-    }
-
     /// Computes and returns the hash of the trie's root node.
     #[inline]
     pub fn hash_slow(&self) -> B256 {
@@ -218,6 +204,27 @@ impl Trie {
         trie.0.resolve_digests(rlp_by_digest)?;
         Ok(trie)
     }
+
+    /// Creates a new trie like [`Trie::from_prehashed_nodes`] whose keys are all `key_len` nibbles
+    /// long, such as the state trie or a storage trie, whose keys are 64-nibble hashes.
+    ///
+    /// The check runs while the nodes are resolved and skips unresolved nodes.
+    ///
+    /// # Errors
+    ///
+    /// This function returns an error if [`Trie::from_prehashed_nodes`] does, if a leaf ends
+    /// before or after `key_len` nibbles, or if an extension or branch node leaves no nibbles for
+    /// its child.
+    #[inline]
+    pub fn from_prehashed_nodes_with_key_len(
+        root: B256,
+        rlp_by_digest: &B256IndexMap<impl AsRef<[u8]>>,
+        key_len: usize,
+    ) -> alloy_rlp::Result<Self> {
+        let mut trie = Self::from_digest(root);
+        trie.0.resolve_digests_with_key_len(rlp_by_digest, Some(key_len))?;
+        Ok(trie)
+    }
 }
 
 impl<K: AsRef<[u8]>> FromIterator<(K, Bytes)> for Trie {
@@ -316,14 +323,6 @@ impl CachedTrie {
         self.inner.size()
     }
 
-    /// Checks that every resolved path from the root is exactly `key_len` nibbles long.
-    ///
-    /// See [`Trie::validate_key_len`] for detailed documentation.
-    #[inline]
-    pub fn validate_key_len(&self, key_len: usize) -> alloy_rlp::Result<()> {
-        self.inner.validate_key_len(key_len)
-    }
-
     /// Computes and returns the hash of the trie's root node.
     ///
     /// This method may utilize cached hashes within the internal node structure (if available) to
@@ -418,6 +417,21 @@ impl CachedTrie {
     ) -> alloy_rlp::Result<Self> {
         let mut trie = Self::from_digest(root);
         trie.inner.resolve_digests(rlp_by_digest)?;
+        Ok(trie)
+    }
+
+    /// Creates a new trie like [`CachedTrie::from_prehashed_nodes`] whose keys are all `key_len`
+    /// nibbles long.
+    ///
+    /// See [`Trie::from_prehashed_nodes_with_key_len`] for detailed documentation.
+    #[inline]
+    pub fn from_prehashed_nodes_with_key_len(
+        root: B256,
+        rlp_by_digest: &B256IndexMap<impl AsRef<[u8]>>,
+        key_len: usize,
+    ) -> alloy_rlp::Result<Self> {
+        let mut trie = Self::from_digest(root);
+        trie.inner.resolve_digests_with_key_len(rlp_by_digest, Some(key_len))?;
         Ok(trie)
     }
 }
@@ -559,24 +573,34 @@ mod tests {
     }
 
     #[test]
-    fn validate_key_len() {
+    fn from_prehashed_nodes_with_key_len() {
         let leaf = |len| Node::Leaf(Nibbles::from_nibbles(vec![0; len]), vec![0].into(), NoCache);
         let branch = |len| Node::Branch(Children::from([(0, leaf(len)), (1, leaf(len))]), NoCache);
         let extension = |len, child: Node<NoCache>| {
             Node::Extension(Nibbles::from_nibbles(vec![0; len]), child.into(), NoCache)
         };
+        // rebuilds the trie from its RLP nodes, checking the key length while resolving them
+        let rebuild = |root: Node<NoCache>, key_len| {
+            let trie = Trie(root);
+            let rlp_by_digest: B256IndexMap<_> =
+                trie.rlp_nodes().into_iter().map(|rlp| (keccak256(&rlp), rlp)).collect();
+            Trie::from_prehashed_nodes_with_key_len(trie.hash_slow(), &rlp_by_digest, key_len)
+        };
 
-        assert!(Trie(Node::Null).validate_key_len(64).is_ok());
-        assert!(Trie::from_digest(B256::ZERO).validate_key_len(64).is_ok());
-        assert!(Trie(leaf(64)).validate_key_len(64).is_ok());
-        assert!(Trie(branch(63)).validate_key_len(64).is_ok());
-        assert!(Trie(extension(1, branch(62))).validate_key_len(64).is_ok());
+        assert!(rebuild(Node::Null, 64).is_ok());
+        assert!(rebuild(Node::Digest(B256::ZERO), 64).is_ok());
+        assert!(rebuild(leaf(64), 64).is_ok());
+        assert!(rebuild(branch(63), 64).is_ok());
+        assert!(rebuild(extension(1, branch(62)), 64).is_ok());
+        // the leaves of this branch are short enough to be inlined into it
+        assert!(rebuild(branch(1), 2).is_ok());
 
         // leaves must end exactly at the key length
-        assert!(Trie(leaf(63)).validate_key_len(64).is_err());
-        assert!(Trie(branch(62)).validate_key_len(64).is_err());
-        assert!(Trie(branch(64)).validate_key_len(64).is_err());
-        assert!(Trie(extension(1, branch(63))).validate_key_len(64).is_err());
+        assert!(rebuild(leaf(63), 64).is_err());
+        assert!(rebuild(branch(62), 64).is_err());
+        assert!(rebuild(branch(64), 64).is_err());
+        assert!(rebuild(extension(1, branch(63)), 64).is_err());
+        assert!(rebuild(branch(1), 3).is_err());
 
         // extensions and branches must leave at least one nibble for their children
         let digests = || {
@@ -584,9 +608,9 @@ mod tests {
                 Children::from([(0, Node::Digest(B256::ZERO)), (1, Node::Digest(B256::ZERO))]);
             Node::Branch(children, NoCache)
         };
-        assert!(Trie(extension(63, digests())).validate_key_len(64).is_ok());
-        assert!(Trie(extension(64, Node::Digest(B256::ZERO))).validate_key_len(64).is_err());
-        assert!(Trie(digests()).validate_key_len(0).is_err());
+        assert!(rebuild(extension(63, digests()), 64).is_ok());
+        assert!(rebuild(extension(64, Node::Digest(B256::ZERO)), 64).is_err());
+        assert!(rebuild(digests(), 0).is_err());
     }
 
     #[test]
