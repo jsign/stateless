@@ -204,27 +204,6 @@ impl Trie {
         trie.0.resolve_digests(rlp_by_digest)?;
         Ok(trie)
     }
-
-    /// Creates a new trie like [`Trie::from_prehashed_nodes`] whose keys are all `key_len` nibbles
-    /// long, such as the state trie or a storage trie, whose keys are 64-nibble hashes.
-    ///
-    /// The check runs while the nodes are resolved and skips unresolved nodes.
-    ///
-    /// # Errors
-    ///
-    /// This function returns an error if [`Trie::from_prehashed_nodes`] does, if a leaf ends
-    /// before or after `key_len` nibbles, or if an extension or branch node leaves no nibbles for
-    /// its child.
-    #[inline]
-    pub fn from_prehashed_nodes_with_key_len(
-        root: B256,
-        rlp_by_digest: &B256IndexMap<impl AsRef<[u8]>>,
-        key_len: usize,
-    ) -> alloy_rlp::Result<Self> {
-        let mut trie = Self::from_digest(root);
-        trie.0.resolve_digests_with_key_len(rlp_by_digest, Some(key_len))?;
-        Ok(trie)
-    }
 }
 
 impl<K: AsRef<[u8]>> FromIterator<(K, Bytes)> for Trie {
@@ -421,9 +400,15 @@ impl CachedTrie {
     }
 
     /// Creates a new trie like [`CachedTrie::from_prehashed_nodes`] whose keys are all `key_len`
-    /// nibbles long.
+    /// nibbles long, such as the state trie or a storage trie, whose keys are 64-nibble hashes.
     ///
-    /// See [`Trie::from_prehashed_nodes_with_key_len`] for detailed documentation.
+    /// The check runs while the nodes are resolved and skips unresolved nodes.
+    ///
+    /// # Errors
+    ///
+    /// This function returns an error if [`CachedTrie::from_prehashed_nodes`] does, if a leaf ends
+    /// before or after `key_len` nibbles, or if an extension or branch node leaves no nibbles for
+    /// its child.
     #[inline]
     pub fn from_prehashed_nodes_with_key_len(
         root: B256,
@@ -584,7 +569,7 @@ mod tests {
             let trie = Trie(root);
             let rlp_by_digest: B256IndexMap<_> =
                 trie.rlp_nodes().into_iter().map(|rlp| (keccak256(&rlp), rlp)).collect();
-            Trie::from_prehashed_nodes_with_key_len(trie.hash_slow(), &rlp_by_digest, key_len)
+            CachedTrie::from_prehashed_nodes_with_key_len(trie.hash_slow(), &rlp_by_digest, key_len)
         };
 
         assert!(rebuild(Node::Null, 64).is_ok());
